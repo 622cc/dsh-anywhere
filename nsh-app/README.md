@@ -48,7 +48,8 @@ iOS (Xcode and xcodegen; the NSH checkout also runs `cargo xtask ios-embed --no-
 
 ```sh
 ios/build.sh                                      # → ios/build/DSH.app for the simulator
-DEVICE=1 DSH_TEAM=<team id> ios/build.sh          # for a phone, signed by your Apple developer team
+DEVICE=1 ios/build.sh                             # for a phone, signed by your own Apple team: ios/signing.env.example, ../AGENT-IPHONE.md
+ARCHIVE=1 DSH_TEAM=<team id> DSH_PROFILE="<App Store profile>" ios/build.sh   # → ios/build/export/DSH.ipa for TestFlight, then ios/check-testflight.sh runs on it
 (cd ios/DSHKit && swift test)                     # shell tests: pairing validation, pinned TLS bridge, upload
 ```
 

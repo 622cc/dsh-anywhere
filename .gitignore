@@ -61,3 +61,6 @@ private/
 
 # Test keys, made by make-fixtures.ts
 nsh-app/android/app/src/test/resources/pairing.json
+
+# Your own Apple team and app id prefix (nsh-app/ios/signing.env.example)
+nsh-app/ios/signing.env

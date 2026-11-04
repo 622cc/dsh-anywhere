@@ -15,7 +15,8 @@ and no VPN. Installing is one command: nothing to clone or build.
 4. Earlier install from source: if `~/.dsh/profiles/desktop/cordis.patch.yml` contains
    `# DSH-MOBILE-COMPANION-BEGIN`, tell the person and, with their consent, delete the lines from `BEGIN` to `END`
    inclusive. Paired phones are kept: both installs use the same private folder.
-5. Tell the person the phone needs Android 9 or later.
+5. Tell the person the phone needs Android 9 or later. For an iPhone, install the companion here, then follow
+   [AGENT-IPHONE.md](AGENT-IPHONE.md).
 
 ## 2. Install
 

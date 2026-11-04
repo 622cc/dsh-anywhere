@@ -3,6 +3,7 @@
 // sent message shows its photos (session/attachment) and files (name and size: DSH has no way to read a file back).
 import { host, Image, Picker, signal, Text, View } from 'nsh'
 import { base64, bytesOf, sizeLabel, type Draft } from './attach.ts'
+import { trying } from './state.ts'
 import type { Attached } from './fold.ts'
 import { dsh } from './state.ts'
 import { readable, S } from './strings.ts'
@@ -13,6 +14,7 @@ let counter = 0
 /** Asks Photo or File and adds what the person picks; uploads a file right away (a receipt belongs to this chat). */
 export async function addAttachment(sessionId: string, add: (d: Draft) => void, onError: (m: string) => void, uploading: (on: boolean) => void) {
   const action = await chooseAction({ actions: [{ id: 'photo', label: S.photo, icon: 'image' }, { id: 'file', label: S.file, icon: 'file' }] })
+  if (trying()) { if (action) onError(S.tryIt.noAttach); return }
   try {
     if (action === 'photo') {
       // DSH keeps at most 2048 px a side; scaling here keeps the message small.

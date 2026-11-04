@@ -1,7 +1,7 @@
 // DSH on the phone: the same chats as DSH Desktop, read and driven through DSH's own protocol.
-import { effect, host, Keyboard, mount, safeAreaInsets, signal, Text, View } from 'nsh'
+import { effect, host, Keyboard, mount, openUrl, safeAreaInsets, signal, Text, View } from 'nsh'
 import { createNavStack, Input, NavPage, NavStack } from 'nsh/base'
-import { asks, boot, dsh, linkError, linking, loaded, news, pairWith, pending, scan, settings, started, turnErrors } from './src/state.ts'
+import { asks, boot, dsh, linkError, linking, loaded, news, pairWith, pending, PRIVACY_URL, scan, settings, started, trying, tryIt, turnErrors, unlink } from './src/state.ts'
 import { Attention } from './src/notify.tsx'
 import { summaries } from './src/workspaces.ts'
 import { SessionsScreen, type Summary } from './src/sessions.tsx'
@@ -74,6 +74,22 @@ function Connect() {
         </View>
       </If>
       <If when={linkError()}><Text testID="link-error" class="text-destructive text-[15px] leading-[21px]">{linkError()}</Text></If>
+      <View role="button" testID="try-it" onPress={() => { if (!linking()) tryIt() }} class="rounded-[10px] border border-border py-3 items-center mt-3 active:bg-secondary">
+        <Text class="text-foreground text-[15px] font-medium">{S.tryIt.entry}</Text>
+      </View>
+      <View role="link" testID="privacy" onPress={() => { openUrl(PRIVACY_URL).catch(() => {}) }} hitSlop={6} class="py-2 items-center active:opacity-60">
+        <Text class="text-muted-foreground text-[13px]">{S.privacy}</Text>
+      </View>
+    </View>
+  )
+}
+
+/** Above the chats while on the sample: what this is, and the way to a real link. */
+function TryBanner() {
+  return (
+    <View testID="try-banner" class="flex-row items-center gap-3 mx-4 mt-2 mb-1 rounded-[10px] bg-secondary px-3 py-2">
+      <Text class="flex-1 text-foreground text-[13px] leading-[18px]">{S.tryIt.banner}</Text>
+      <View role="button" testID="try-link" onPress={() => unlink()} hitSlop={6} class="active:opacity-60"><Text class="text-primary text-[13px] font-medium">{S.tryIt.leave}</Text></View>
     </View>
   )
 }
@@ -115,6 +131,7 @@ function App() {
           <IconButton name="more" label={S.more} testID="more" onPress={() => { if (Date.now() - menuClosed > 300) menu.set(true) }} />
         </View>}>
         <View class="flex-1">
+          <If when={trying()}><TryBanner /></If>
           <SessionsScreen onOpen={(session) => nav.push({ name: 'chat', session })} newChat={newChat} onNewChatClosed={() => newChat.set(false)} />
           <HeaderMenu open={menu} onClose={() => { menuClosed = Date.now(); menu.set(false) }} actions={[{ id: 'schedules', label: S.schedules, icon: 'clock' }, { id: 'settings', label: S.settings, icon: 'sliders' }]}
             onChoose={(id) => { if (id === 'schedules') nav.push({ name: 'schedules' }); else if (id === 'settings') nav.push({ name: 'settings' }) }} />
@@ -168,8 +185,11 @@ function App() {
         <Each of={settings() ? [settings()!.key] : []}>{() => (
           <>
             <NavStack state={nav} class="flex-1">{(route) => page(route)}</NavStack>
+            {/* On the sample nothing is news: the notice stays in sight, and no notification is asked for. */}
+            <If when={!trying()}>
             <Attention visible={visible} open={openChat} asks={asks} news={news}
               io={{ list: () => dsh().rpc('session/list', { _request: {} }).then(summaries), requests: (id) => pending.forSession(id), waiting: () => pending.sessionsWaiting(), errors: turnErrors, ran: started, call: (name, args) => host.call(name, args) }} />
+            </If>
             <LinkNotice />
             <ReachSheet />
             <ActionSheetHost />

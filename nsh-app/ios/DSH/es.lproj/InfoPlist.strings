@@ -1,1 +1,2 @@
 "NSCameraUsageDescription" = "La cámara lee el código de vinculación en la pantalla de la computadora.";
+"NSLocalNetworkUsageDescription" = "En la misma red Wi-Fi, el teléfono se conecta directamente a tu computadora, sin pasar por un relé.";

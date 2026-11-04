@@ -1,1 +1,2 @@
 "NSCameraUsageDescription" = "相機用於讀取電腦螢幕上的配對碼。";
+"NSLocalNetworkUsageDescription" = "在同一 Wi-Fi 下，手機可直接連線到你的電腦，不經過中繼。";

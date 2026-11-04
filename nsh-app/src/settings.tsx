@@ -2,9 +2,9 @@
 // /v1/capabilities; whether it is reached now; how: Tailcat's end-to-end encrypted tunnel, direct or through a relay),
 // Unlink, and the phone's own settings (prefs.ts): appearance, language, notifications. DSH's own settings stay on
 // the computer.
-import { cleanup, effect, host, platform, Scroll, signal, Text, View, type JSX } from 'nsh'
+import { cleanup, effect, host, openUrl, platform, Scroll, signal, Text, View, type JSX } from 'nsh'
 import { Switch } from 'nsh/base'
-import { appActive, connection, dsh, unlink } from './state.ts'
+import { appActive, connection, dsh, PRIVACY_URL, trying, unlink } from './state.ts'
 import { language, S, type Language } from './strings.ts'
 import { notifyPrefs, setLanguage, setNotify, setTheme, theme, type NotifyPrefs, type Theme } from './prefs.ts'
 import { Icon } from './ui.tsx'
@@ -32,7 +32,7 @@ export function SettingsPage() {
   const load = () => dsh().computer().then((c) => computer.set(c), () => {})
   // Direct or through a relay: the tunnel asks the computer (link.path; a direct path can come a little later).
   const route = signal<{ route: string; relay?: string } | undefined>(undefined)
-  const findRoute = () => host.call<{ route?: string; relay?: string }>('link.path').then((v) => route.set(v?.route ? { route: v.route, ...(v.relay ? { relay: v.relay } : {}) } : undefined), () => {})
+  const findRoute = () => trying() ? undefined : host.call<{ route?: string; relay?: string }>('link.path').then((v) => route.set(v?.route ? { route: v.route, ...(v.relay ? { relay: v.relay } : {}) } : undefined), () => {})
   const routeText = () => { const r = route(); return r?.route === 'direct' ? S.pathDirect : r?.route === 'relay' ? S.pathRelay((r.relay ?? '').toUpperCase() || '—') : '' }
   const permission = () => host.call<{ granted?: boolean }>('notify.permission').then((v) => granted.set(v?.granted === true), () => {})
   load(); permission(); findRoute()
@@ -65,17 +65,25 @@ export function SettingsPage() {
         <View class="flex-row items-start gap-3 px-[14px] py-[11px] border-t border-border">
           <Text class="text-foreground text-[15px]">{S.connection}</Text>
           <View class="flex-1 items-end gap-[2px]">
-            <Text class="text-muted-foreground text-[15px] text-right">{S.viaTailcat}</Text>
+            <Text class="text-muted-foreground text-[15px] text-right">{trying() ? S.tryIt.onPhone : S.viaTailcat}</Text>
             <If when={routeText()}><Text testID="route" class="text-muted-foreground text-[13px] text-right">{routeText()}</Text></If>
           </View>
         </View>
         <If when={computer()?.dshVersion}><Info label={S.dshVersion} value={computer()?.dshVersion ?? ''} /></If>
         <If when={computer()?.companionVersion}><Info label={S.companionVersion} value={computer()?.companionVersion ?? ''} /></If>
       </Group>
-      <View role="button" testID="settings-unlink" onPress={() => unlink()} class="mt-3 rounded-[14px] bg-card border border-border px-[14px] py-[11px] items-center active:bg-secondary">
-        <Text class="text-destructive text-[15px] font-medium">{S.unlink}</Text>
-      </View>
-      <Text class="px-2 pt-[6px] text-muted-foreground text-[13px] leading-[18px]">{S.unlinkHint}</Text>
+      <If when={trying()} else={
+        <>
+          <View role="button" testID="settings-unlink" onPress={() => unlink()} class="mt-3 rounded-[14px] bg-card border border-border px-[14px] py-[11px] items-center active:bg-secondary">
+            <Text class="text-destructive text-[15px] font-medium">{S.unlink}</Text>
+          </View>
+          <Text class="px-2 pt-[6px] text-muted-foreground text-[13px] leading-[18px]">{S.unlinkHint}</Text>
+        </>
+      }>
+        <View role="button" testID="try-exit" onPress={() => unlink()} class="mt-3 rounded-[14px] bg-card border border-border px-[14px] py-[11px] items-center active:bg-secondary">
+          <Text class="text-foreground text-[15px] font-medium">{S.tryIt.exit}</Text>
+        </View>
+      </If>
 
       <Label text={S.appearance} />
       <View class="flex-row rounded-[12px] bg-secondary p-[3px]">
@@ -114,6 +122,10 @@ export function SettingsPage() {
         {toggle('banners', S.notifyBanners)}
         {toggle('background', S.notifyBackground, platform.os === 'android' ? S.notifyBackgroundHint : undefined)}
       </Group>
+
+      <View role="link" testID="settings-privacy" onPress={() => { openUrl(PRIVACY_URL).catch(() => {}) }} class="mt-5 rounded-[14px] bg-card border border-border px-[14px] py-[11px] flex-row items-center active:bg-secondary">
+        <Text class="flex-1 text-foreground text-[15px]">{S.privacy}</Text>
+      </View>
     </Scroll>
   )
 }

@@ -40,7 +40,8 @@
 
 全部是 MIT 协议。
 
-- 手机 App：[构建和测试](nsh-app/README.md#build-and-test)。iOS 工程也在那里构建，目前没有 iPhone 发布版。
+- iPhone App：用你自己的 Apple 账号签名并安装。步骤写给你或你的编程 agent：[AGENT-IPHONE.md](AGENT-IPHONE.md)。
+- Android App：[构建和测试](nsh-app/README.md#build-and-test)。
 - Mac 插件：[从源码构建和安装](docs/SETUP-MAC.md#build-and-install-from-source)。
 
 ## 致谢

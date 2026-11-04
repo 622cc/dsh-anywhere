@@ -1,1 +1,2 @@
 "NSCameraUsageDescription" = "L’appareil photo lit le code d’association affiché sur l’écran de l’ordinateur.";
+"NSLocalNetworkUsageDescription" = "Sur le même réseau Wi-Fi, le téléphone se connecte directement à votre ordinateur, sans passer par un relais.";

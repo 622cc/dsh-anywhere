@@ -13,6 +13,7 @@ const ZH_EVERY_ONE: Record<ScheduleUnit, string> = { day: '每天', hour: '每�
 
 export const ZH_HANT: Strings = {
   think: '思考', chats: '對話', newChat: '新增對話', untitled: '新對話', message: '傳訊息給 DSH', send: '傳送', sending: '傳送中…', sendingSlow: '仍在傳送，電腦尚未回應', delivered: '已送達', deliveredIdle: '已送達，代理尚未開始處理', queued: '排隊中', notSent: '未傳送，點一下重試',
+  privacy: '隱私權', tryIt: { entry: '用範例資料試用', banner: '範例資料只在這支手機上，不會傳送到任何地方。', leave: '連結電腦', exit: '離開範例', computer: '範例電腦', model: '範例模型', onPhone: '範例資料在這支手機上', noAttach: '要加入檔案，請先連結電腦。', workspace: '範例專案', fixTitle: '修復失敗的登入測試', fixAsk: '登入測試失敗了，可以幫我修嗎？', fixAnswer: '測試還在等舊的錯誤訊息。我更新了它，24 個測試全部通過。', deleteTitle: '刪除舊的建置資料夾', deleteAsk: '請刪除舊的建置資料夾。', deleteReason: '刪除資料夾 build/old', deleteAnswer: '好了，舊的建置資料夾已刪除。', deleteRejected: '好的，資料夾沒有動。', nameTitle: '幫發布版本取名字', nameAsk: '幫我替下個版本取名字。', nameQuestion: '你喜歡哪個名字？', nameOptions: ['港灣', '燈籠', '草地'], nameAnswer: (name: string) => `選得好。這個版本現在叫 ${name}。`, reply: '這是範例回答。在真實的 app 裡，你的訊息會傳給電腦上的 agent，它的回答會顯示在這裡。', taskTitle: '檢查相依套件', taskPrompt: '找出過期的相依套件並列出來。', readme: '# 範例專案\n\n用來試用 DSH Anywhere 的小專案。\n' },
   linkTitle: '連結你的電腦', linkHow: '在 Mac 上開啟 DSH，顯示 DSH Anywhere 配對碼，再用這支手機掃描。',
   scan: '掃描配對碼', paste: '改為貼上配對碼', linkCode: '連結', linking: '連結中…', unlink: '解除連結', latest: '跳到最新', model: '模型', thinking: '思考',
   allow: '允許', reject: '拒絕', allowTool: (tool: string) => `允許 ${tool}？`, sendAnswer: '傳送回答', otherAnswer: '其他回答', yourAnswer: '你的回答', waiting: '等你回覆',

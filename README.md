@@ -40,7 +40,8 @@ A paired phone sees every chat and can run agents on your Mac. The code works on
 
 It's all MIT.
 
-- Phone app: [build and test](nsh-app/README.md#build-and-test). The iOS project builds from there too; there is no iPhone release yet.
+- iPhone app: sign it with your own Apple account and install it. Steps for you or your coding agent: [AGENT-IPHONE.md](AGENT-IPHONE.md).
+- Android app: [build and test](nsh-app/README.md#build-and-test).
 - Mac companion: [build and install from source](docs/SETUP-MAC.md#build-and-install-from-source).
 
 ## Credits

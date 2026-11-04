@@ -5,6 +5,7 @@ import { Dsh, type ConnectionState, type DshError } from './dsh.ts'
 import { Pending } from './events.ts'
 import type { Check } from './reach.ts'
 import { readable, S } from './strings.ts'
+import { tryComputer, TRY_KEY, TRY_ORIGIN } from './tryit.ts'
 
 export interface Settings { origin: string; key: string }
 type LinkState = { paired: false } | { paired: true; origin: string; token: string }
@@ -12,12 +13,14 @@ export const settings = signal<Settings | null>(null)
 export const loaded = signal(false)
 export const linking = signal(false)
 export const linkError = signal('')
+/** On the sample of tryit.ts: no link, nothing leaves the phone, and nothing is kept for the next launch. */
+export const trying = signal(false)
 const socketState = signal<ConnectionState>('connecting')
 /** Whether Android says the phone has a network (the shell's `network` event). The link runs inside a tunnel whose
  * connections outlive a network change, so the socket alone does not notice the phone going offline. */
 export const network = signal(true)
 export const reachState = (online: boolean, socket: ConnectionState): ConnectionState => (online ? socket : 'offline')
-export const connection = computed(() => reachState(network(), socketState()))
+export const connection = computed(() => (trying() ? 'online' : reachState(network(), socketState())))
 /** What each part last answered (reach.ts), when the next try is, and how the tunnel goes now, for the connection's state. */
 export const check = signal<Check | undefined>(undefined)
 export const retryAt = signal<number | undefined>(undefined)
@@ -49,7 +52,7 @@ export function dsh(): Dsh {
   const s = settings(); if (!s) throw new Error('not linked')
   if (!client || client.origin !== s.origin) {
     client?.close()
-    const made: Dsh = client = new Dsh(s.origin, s.key, { onStuck: async () => {
+    const made: Dsh = client = new Dsh(s.origin, s.key, s.origin === TRY_ORIGIN ? tryComputer() : { onStuck: async () => {
       const next = await host.call<LinkState>('link.reset')
       if (next.paired && client === made) { made.origin = next.origin; settings.set({ origin: next.origin, key: next.token }) }
     } })
@@ -59,7 +62,7 @@ export function dsh(): Dsh {
   }
   return client
 }
-const adopt = (state: LinkState) => { stopEvents?.(); client?.close(); client = undefined; pending.apply({ type: 'ready', clientId: '' }); asks.update((n) => n + 1); check.set(undefined); retryAt.set(undefined); routeText.set(''); lastLook = 0; settings.set(state.paired ? { origin: state.origin, key: state.token } : null) }
+const adopt = (state: LinkState, sample = false) => { trying.set(sample); stopEvents?.(); client?.close(); client = undefined; pending.apply({ type: 'ready', clientId: '' }); asks.update((n) => n + 1); check.set(undefined); retryAt.set(undefined); routeText.set(''); lastLook = 0; settings.set(state.paired ? { origin: state.origin, key: state.token } : null) }
 
 /** Whether the app is on screen (the shell's app.state); true where the shell does not say. */
 export const appActive = signal(true)
@@ -70,7 +73,7 @@ export function reconnect() { client?.retryNow(); lastLook = 0 }
 const FAILING_MS = 15_000, WORKING_MS = 30_000, GRACE_MS = 3_000
 let lastLook = 0, looking = false, failingSince = 0
 async function look() {
-  if (looking || !settings()) return
+  if (looking || !settings() || trying()) return
   looking = true; lastLook = Date.now()
   try {
     if (connection() === 'online') {
@@ -129,9 +132,15 @@ export async function scan() {
 /** The link screen comes at once. Telling the computer goes on behind it, up to 30 seconds when the computer is silent;
  * a code linked meanwhile waits for that on the link's own thread. */
 export function unlink() {
+  const real = !trying()
   adopt({ paired: false })
-  host.call('link.forget').catch(() => {})
+  if (real) host.call('link.forget').catch(() => {})
 }
+/** The sample instead of a link. Only an unlinked phone offers it, so there is no link to lose. */
+export function tryIt() {
+  adopt({ paired: true, origin: TRY_ORIGIN, token: TRY_KEY }, true)
+}
+export const PRIVACY_URL = 'https://dsh-anywhere.jingtao.io/privacy/'
 
 /** What the shell's `ui.open` needs for a module the agent built with show_interface (companion ui-modules.ts). */
 export const interfaceRequest = (s: Settings, callId: string, title: string) => ({

@@ -1,1 +1,2 @@
 "NSCameraUsageDescription" = "카메라로 컴퓨터 화면의 페어링 코드를 읽습니다.";
+"NSLocalNetworkUsageDescription" = "같은 Wi-Fi에서는 휴대폰이 릴레이를 거치지 않고 컴퓨터에 직접 연결됩니다.";

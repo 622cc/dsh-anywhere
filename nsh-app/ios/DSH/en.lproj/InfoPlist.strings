@@ -1,1 +1,2 @@
 "NSCameraUsageDescription" = "The camera reads the pairing code on the computer’s screen.";
+"NSLocalNetworkUsageDescription" = "On the same Wi-Fi, the phone reaches your computer directly instead of through a relay.";
