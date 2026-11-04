@@ -97,7 +97,7 @@ export function DetailsView(props: { details: () => Details | undefined; catalog
                   {isLive(j()) ? <LiveDot size={8} /> : <View class={`w-[8px] h-[8px] rounded-full ${j().status === 'completed' ? 'bg-muted-foreground' : 'bg-destructive'}`} />}
                   <View class="flex-1 gap-[2px]">
                     <Text class="text-foreground text-[15px] leading-[21px] line-clamp-2 font-mono">{j().label}</Text>
-                    <Text class="text-muted-foreground text-[12px]">{`${S.jobStatus[j().status]}, ${duration((j().finishedAt ?? now()) - j().startedAt)}`}</Text>
+                    <Text class="text-muted-foreground text-[12px]">{S.jobLine(S.jobStatus[j().status], duration((j().finishedAt ?? now()) - j().startedAt))}</Text>
                   </View>
                 </View>
               )}</Each>

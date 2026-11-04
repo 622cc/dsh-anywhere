@@ -97,6 +97,7 @@ export const FR: Strings = {
   jobs: (live: number, total: number) => live ? `${live} ${plural(live, 'processus en arrière-plan actif', 'processus en arrière-plan actifs')}` : `${total} processus en arrière-plan`,
   jobsTitle: 'Processus en arrière-plan', jobsRunning: 'En cours', jobsFinished: (n: number) => `Terminés : ${n}`,
   jobStatus: { running: 'en cours', stopping: 'arrêt en cours', completed: 'terminé', failed: 'en erreur', killed: 'arrêté' },
+  jobLine: (status: string, took: string) => `${status}, ${took}`,
   jobStop: 'Arrêter', jobConfirmStop: 'Confirmer l’arrêt', jobStopFailed: 'Échec de l’arrêt', jobGap: '… sortie précédente supprimée …', jobNoOutput: 'Pas encore de sortie',
   subagents: (running: number, total: number) => running ? `${running} ${plural(running, 'sous-agent en cours', 'sous-agents en cours')}` : `${total} ${plural(total, 'sous-agent', 'sous-agents')}`,
   subagentsTitle: 'Sessions de sous-agents', subagentRunning: 'en cours',

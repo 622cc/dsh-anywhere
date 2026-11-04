@@ -12,8 +12,8 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: $(DSH_VERSION)
     CURRENT_PROJECT_VERSION: $(DSH_BUILD)
-    DSH_VERSION: "0.1.1"
-    DSH_BUILD: "2"
+    DSH_VERSION: "0.1.2"
+    DSH_BUILD: "3"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: $(DSH_TEAM) # set at build time (ios/build.sh), never in this file
 targets:

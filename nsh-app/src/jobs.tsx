@@ -85,7 +85,7 @@ function JobRow(props: { sessionId: string; job: () => Job; divider: () => boole
         {isLive(j()) ? <LiveDot size={8} /> : <View class={`w-[8px] h-[8px] rounded-full ${j().status === 'completed' ? 'bg-muted-foreground' : 'bg-destructive'}`} />}
         <View class="flex-1 gap-[2px]">
           <Text class="text-foreground text-[15px] leading-[21px] line-clamp-2 font-mono">{j().label}</Text>
-          <Text class="text-muted-foreground text-[12px]">{`${S.jobStatus[j().status]}, ${took()}`}</Text>
+          <Text class="text-muted-foreground text-[12px]">{S.jobLine(S.jobStatus[j().status], took())}</Text>
         </View>
         <If when={j().status === 'running'}>
           <View role="button" testID="job-stop" onPress={stop} hitSlop={6} class={`h-[30px] px-[12px] rounded-full items-center justify-center active:opacity-70 ${confirming() ? 'bg-destructive' : 'bg-secondary'}`}>

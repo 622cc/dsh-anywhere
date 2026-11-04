@@ -73,3 +73,39 @@ test('the chat\'s ⋯ menu opens Details, read from session/projections for that
   await app.press('id:menu-trajectory')
   await app.waitFor('text:Loading trajectory…')
 })
+
+// A job's status and time, on the details page and in the jobs sheet: Chinese joins them with its own comma and no space.
+for (const [where, fixture, ready] of [['details', './fixtures/details.tsx', 'npm test'], ['jobs sheet', './fixtures/jobs.tsx', 'npm test']] as const) {
+  for (const [locale, running, finished] of [
+    ['zh-Hans-CN', /^运行中，\d+ 秒$/, '已完成，30 秒'],
+    ['zh-Hant-TW', /^執行中，\d+ 秒$/, '已完成，30 秒'],
+    ['en-US', /^running, \d+s$/, 'completed, 30s'],
+    ['ja-JP', /^実行中, \d+\s?秒$/, /^完了, 30\s?秒$/],
+  ] as const) {
+    test(`${where} in ${locale}: a job's status and time are joined the way the language writes them`, async () => {
+      const app = await open(fixture, { locale })
+      await app.waitFor(`text:${ready}`)
+      const texts = app.texts()
+      expect(texts.some((t) => running.test(t))).toBe(true)
+      expect(texts.some((t) => (typeof finished === 'string' ? t === finished : finished.test(t)))).toBe(true)
+    })
+  }
+}
+
+test('the jobs sheet in Chinese counts the finished jobs number first', async () => {
+  const app = await open('./fixtures/jobs.tsx', { locale: 'zh-Hans-CN' })
+  await app.waitFor('text:1 个已结束')
+})
+
+// A tool call's status and time on the trajectory page follow the same rule as a job's.
+for (const [locale, completed, failed] of [
+  ['zh-Hans-CN', '已完成，4 秒', '失败，1 秒'],
+  ['zh-Hant-TW', '已完成，4 秒', '失敗，1 秒'],
+  ['en-US', 'Completed, 4s', 'Failed, 1s'],
+] as const) {
+  test(`the trajectory in ${locale}: a tool call's status and time are joined the way the language writes them`, async () => {
+    const app = await open('./fixtures/trajectory.tsx', { locale })
+    await app.waitFor(`text:${completed}`)
+    expect(app.texts()).toContain(failed)
+  })
+}

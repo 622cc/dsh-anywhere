@@ -93,6 +93,7 @@ export const KO: Strings = {
   jobs: (live: number, total: number) => live ? `백그라운드 작업 ${live}개 실행 중` : `백그라운드 작업 ${total}개`,
   jobsTitle: '백그라운드 작업', jobsRunning: '실행 중', jobsFinished: (n: number) => `종료됨 ${n}개`,
   jobStatus: { running: '실행 중', stopping: '중지하는 중', completed: '완료됨', failed: '실패', killed: '중지됨' },
+  jobLine: (status: string, took: string) => `${status}, ${took}`,
   jobStop: '중지', jobConfirmStop: '중지 확인', jobStopFailed: '중지 실패', jobGap: '… 이전 출력 삭제됨 …', jobNoOutput: '아직 출력 없음',
   subagents: (running: number, total: number) => running ? `서브에이전트 ${running}개 실행 중` : `서브에이전트 ${total}개`,
   subagentsTitle: '서브에이전트 세션', subagentRunning: '실행 중',

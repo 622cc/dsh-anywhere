@@ -32,7 +32,7 @@ export function TrajectoryPage(props: { sessionId: string }) {
 
 const clock = (at: number) => new Date(at).toLocaleTimeString(S.ago.date, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 /** "Completed, 4s"; a running call has no length yet. */
-const meta = (c: Call) => (c.endedAt === undefined ? S.callStatus[c.status] : `${S.callStatus[c.status]}, ${duration(c.endedAt - c.at)}`)
+const meta = (c: Call) => (c.endedAt === undefined ? S.callStatus[c.status] : S.jobLine(S.callStatus[c.status], duration(c.endedAt - c.at)))
 
 export function TrajectoryView(props: { turns: () => Turn[]; loaded: () => boolean; error: () => string; retry: () => void }) {
   let list: ListRef | undefined

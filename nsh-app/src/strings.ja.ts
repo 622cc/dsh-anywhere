@@ -91,6 +91,7 @@ export const JA: Strings = {
   jobs: (live: number, total: number) => live ? `バックグラウンドジョブ${live}件を実行中` : `バックグラウンドジョブ${total}件`,
   jobsTitle: 'バックグラウンドジョブ', jobsRunning: '実行中', jobsFinished: (n: number) => `終了：${n}件`,
   jobStatus: { running: '実行中', stopping: '停止中', completed: '完了', failed: '失敗', killed: '停止済み' },
+  jobLine: (status: string, took: string) => `${status}, ${took}`,
   jobStop: '停止', jobConfirmStop: '停止を確認', jobStopFailed: '停止に失敗しました', jobGap: '… 以前の出力は破棄されました …', jobNoOutput: '出力はまだありません',
   subagents: (running: number, total: number) => running ? `${running}個のサブエージェントが実行中` : `サブエージェント${total}個`,
   subagentsTitle: 'サブエージェントのセッション', subagentRunning: '実行中',

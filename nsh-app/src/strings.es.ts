@@ -98,6 +98,7 @@ export const ES: Strings = {
   jobs: (live: number, total: number) => live ? `${live} ${plural(live, 'proceso en segundo plano activo', 'procesos en segundo plano activos')}` : `${total} ${plural(total, 'proceso en segundo plano', 'procesos en segundo plano')}`,
   jobsTitle: 'Procesos en segundo plano', jobsRunning: 'En ejecución', jobsFinished: (n: number) => `Finalizados: ${n}`,
   jobStatus: { running: 'en ejecución', stopping: 'deteniéndose', completed: 'completado', failed: 'con error', killed: 'detenido' },
+  jobLine: (status: string, took: string) => `${status}, ${took}`,
   jobStop: 'Detener', jobConfirmStop: 'Confirmar detención', jobStopFailed: 'No se pudo detener', jobGap: '… salida anterior descartada …', jobNoOutput: 'Aún sin salida',
   subagents: (running: number, total: number) => running ? `${running} ${plural(running, 'subagente en ejecución', 'subagentes en ejecución')}` : `${total} ${plural(total, 'subagente', 'subagentes')}`,
   subagentsTitle: 'Sesiones de subagentes', subagentRunning: 'en ejecución',

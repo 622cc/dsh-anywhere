@@ -94,6 +94,7 @@ export const ZH_HANT: Strings = {
   jobs: (live: number, total: number) => live ? `${live} 個背景任務執行中` : `${total} 個背景任務`,
   jobsTitle: '背景任務', jobsRunning: '進行中', jobsFinished: (n: number) => `已結束 ${n}`,
   jobStatus: { running: '執行中', stopping: '正在停止', completed: '已完成', failed: '失敗', killed: '已停止' },
+  jobLine: (status: string, took: string) => `${status}，${took}`,
   jobStop: '停止', jobConfirmStop: '確認停止', jobStopFailed: '停止失敗', jobGap: '……較早的輸出已捨棄……', jobNoOutput: '尚無輸出',
   subagents: (running: number, total: number) => running ? `${running} 個子代理執行中` : `${total} 個子代理`,
   subagentsTitle: '子代理對話', subagentRunning: '執行中',
