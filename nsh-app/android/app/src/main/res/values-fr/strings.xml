@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="done">OK</string>
+    <string name="app_label">DSH</string>
+    <string name="channel_answers">Réponses prêtes</string>
+    <string name="channel_decisions">L’agent attend une décision</string>
+    <string name="channel_watching">Continuer à surveiller en arrière-plan</string>
+    <string name="notify_answer">Réponse prête</string>
+    <string name="notify_failed">Arrêté à cause d’une erreur</string>
+    <string name="notify_decision">L’agent attend votre décision</string>
+    <string name="watching">DSH surveille vos discussions</string>
+    <string name="watching_stop">Arrêter</string>
+</resources>

@@ -6,17 +6,17 @@ import { createRelayServer } from './server.ts';
 import { RelayState, ROUTE_ID } from './state.ts';
 
 export interface RelayCliIo { out: (text: string) => void; error: (text: string) => void; }
-const HELP = `DSH Mobile opaque relay — local administration only\n\ninit --state <private.sqlite>\nprovision --state <private.sqlite> --output <new-private.json>\nrevoke-route --state <private.sqlite> --route <32-lowercase-hex>\nserve --state <private.sqlite> [--bind <IP>] [--port <1..65535>] [--prefix /path]\n      [--external-tls | --cert <PEM> --key <PEM>]\n\nDefault bind is 127.0.0.1:8088. Non-loopback requires TLS or an explicit\ntrusted HTTPS front proxy. Provision writes a secret only to an exclusive\nprivate file, never stdout. Keep the database and capabilities outside Git.\n`;
+const HELP = `DSH Mobile opaque relay — local administration only\n\ninit --state <private.sqlite>\nprovision --state <private.sqlite> --output <new-private.json>\nrevoke-route --state <private.sqlite> --route <32-lowercase-hex>\nserve --state <private.sqlite> [--bind <IP>] [--port <1..65535>] [--prefix /path]\n      [--external-tls [--trust-forwarded-for] | --cert <PEM> --key <PEM>]\n\nDefault bind is 127.0.0.1:8088. Non-loopback requires TLS or an explicit\ntrusted HTTPS front proxy. --trust-forwarded-for keys client quotas on the\nlast X-Forwarded-For hop; use it only when that proxy overwrites the header. Provision writes a secret only to an exclusive\nprivate file, never stdout. Keep the database and capabilities outside Git.\n`;
 function parse(argv: string[]) {
   const command = argv[0] ?? 'help', flags = new Map<string, string | true>();
   for (let i = 1; i < argv.length; i++) {
     const name = argv[i]!;
     if (!name.startsWith('--') || flags.has(name)) throw new Error('invalid_arguments');
-    if (name === '--external-tls') flags.set(name, true);
+    if (name === '--external-tls' || name === '--trust-forwarded-for') flags.set(name, true);
     else { const value = argv[++i]; if (!value || value.startsWith('--')) throw new Error('invalid_arguments'); flags.set(name, value); }
   }
   const allowed: Record<string, string[]> = { init: ['--state'], provision: ['--state', '--output'], 'revoke-route': ['--state', '--route'],
-    serve: ['--state', '--bind', '--port', '--prefix', '--external-tls', '--cert', '--key'] };
+    serve: ['--state', '--bind', '--port', '--prefix', '--external-tls', '--trust-forwarded-for', '--cert', '--key'] };
   if (command !== 'help' && command !== '--help' && (!allowed[command] || [...flags.keys()].some(name => !allowed[command]!.includes(name)))) throw new Error('invalid_arguments');
   return { command, flags };
 }
@@ -59,7 +59,7 @@ export async function runRelayCli(argv: string[], io: RelayCliIo = { out: text =
     const rawPort = value(flags, '--port', '8088');
     if (!/^\d{1,5}$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535) throw new Error('invalid_arguments');
     const certPath = flags.get('--cert'), keyPath = flags.get('--key');
-    if (Boolean(certPath) !== Boolean(keyPath) || (flags.has('--external-tls') && certPath)) throw new Error('invalid_arguments');
+    if (Boolean(certPath) !== Boolean(keyPath) || (flags.has('--external-tls') && certPath) || (flags.has('--trust-forwarded-for') && !flags.has('--external-tls'))) throw new Error('invalid_arguments');
     let tls: { cert: string; key: string } | undefined;
     if (typeof certPath === 'string' && typeof keyPath === 'string') {
       const cert = await readFile(resolve(certPath)), key = await readFile(resolve(keyPath));
@@ -67,7 +67,7 @@ export async function runRelayCli(argv: string[], io: RelayCliIo = { out: text =
       tls = { cert: cert.toString('utf8'), key: key.toString('utf8') };
     }
     const relay = createRelayServer({ state, bind: value(flags, '--bind', '127.0.0.1'), port: Number(rawPort),
-      pathPrefix: value(flags, '--prefix', ''), externalTls: flags.has('--external-tls'), ...(tls ? { tls } : {}) });
+      pathPrefix: value(flags, '--prefix', ''), externalTls: flags.has('--external-tls'), trustForwardedFor: flags.has('--trust-forwarded-for'), ...(tls ? { tls } : {}) });
     try {
       await relay.start(); io.out('Relay listener started. Inner host traffic remains end-to-end TLS.\n');
       await new Promise<void>(resolveStop => {

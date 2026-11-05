@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="done">Done</string>
+    <string name="app_label">DSH</string>
+    <string name="channel_answers">Answers ready</string>
+    <string name="channel_decisions">Agent needs a decision</string>
+    <string name="channel_watching">Watching work in progress</string>
+    <string name="notify_answer">Answer ready</string>
+    <string name="notify_failed">Stopped with an error</string>
+    <string name="notify_decision">Agent needs your decision</string>
+    <string name="watching">DSH is watching your chats</string>
+    <string name="watching_stop">Stop</string>
+</resources>

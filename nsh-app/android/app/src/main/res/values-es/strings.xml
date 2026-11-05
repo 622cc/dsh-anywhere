@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="done">Listo</string>
+    <string name="app_label">DSH</string>
+    <string name="channel_answers">Respuestas listas</string>
+    <string name="channel_decisions">El agente necesita una decisión</string>
+    <string name="channel_watching">Seguir vigilando en segundo plano</string>
+    <string name="notify_answer">Respuesta lista</string>
+    <string name="notify_failed">Se detuvo por un error</string>
+    <string name="notify_decision">El agente necesita tu decisión</string>
+    <string name="watching">DSH está vigilando tus chats</string>
+    <string name="watching_stop">Detener</string>
+</resources>

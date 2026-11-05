@@ -1,0 +1,9 @@
+DSH Anywhere Tailcat transport
+
+Portions of tailcat/host and tailcat/mobile are adapted from Voxt Mobile
+(https://github.com/jt-wang/voxt-mobile): tools/tailcat-host, ios/VoxtTailcat/Native and the
+local pairing construction in LocalPairing.swift. Voxt Mobile is licensed under the Apache License,
+Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0); those portions remain under it.
+
+Tailcat (https://github.com/tailscale/tailcat) and tailscale.com are BSD-3-Clause, Copyright
+Tailscale Inc & AUTHORS.

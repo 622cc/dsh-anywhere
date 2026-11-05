@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="done">完成</string>
+    <string name="app_label">DSH</string>
+    <string name="channel_answers">回答已完成</string>
+    <string name="channel_decisions">代理需要你做決定</string>
+    <string name="channel_watching">在背景持續關注</string>
+    <string name="notify_answer">回答已完成</string>
+    <string name="notify_failed">因錯誤而停止</string>
+    <string name="notify_decision">代理需要你做決定</string>
+    <string name="watching">DSH 正在關注你的對話</string>
+    <string name="watching_stop">停止</string>
+</resources>

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { mkdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { HostError } from './errors.ts';
 import { FixtureAdapter, FIXTURE, MULTI_PROJECT_FIXTURE } from './fixture-adapter.ts';
 import { startHostServer } from './server.ts';
+import { isEntryPoint } from './entry-point.ts';
 
 export interface DemoOptions { stateDirectory: string; port?: number; answerDelayMs?: number; multiProject?: boolean }
 /** Explicit local-only composition; importing this module never starts a listener. */
@@ -68,7 +68,7 @@ async function main(): Promise<void> {
   } catch { await running.close(); throw new HostError('unavailable'); }
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+if (isEntryPoint(import.meta.url)) {
   main().catch(() => {
     console.error('The local fixture demo could not start. Check the arguments and private output location.');
     process.exitCode = 1;

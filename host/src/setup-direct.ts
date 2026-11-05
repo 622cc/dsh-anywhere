@@ -1,20 +1,21 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { lstat, readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { isCompatibleDshVersion } from './compatibility.ts';
 import { prepareConfiguration } from './config.ts';
 import type { LocalHostConfiguration } from './config.ts';
 import { HostError } from './errors.ts';
-import { assertPrivate, privateDirectory, privatePath, privateRead, privateWrite, protectNewFile } from './private-files.ts';
+import { assertPrivate, privateDirectory, privatePath, privateRead, privateWrite, protectNewFile, windowsPowerShell } from './private-files.ts';
 
 export function declaredDshVersion(value = 'auto'): string {
   let version = value;
   if (value === 'auto') {
     try {
       const output = process.platform === 'win32'
-        ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; $global:LASTEXITCODE=0; $dsh=Get-Command dsh -ErrorAction Stop; & $dsh --version; if (-not $? -or $LASTEXITCODE -ne 0) { exit 1 }"], { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+        ? execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; $global:LASTEXITCODE=0; $dsh=Get-Command dsh -ErrorAction Stop; & $dsh --version; if (-not $? -or $LASTEXITCODE -ne 0) { exit 1 }"], { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
         : execFileSync('dsh', ['--version'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
       version = output.trim(); // No range, guessed suffix or runtime method probing.
     } catch { throw new HostError('unsupported_dsh_version'); }
@@ -31,8 +32,14 @@ export function directHosts(hosts: readonly string[]): string[] {
   }
   return [...new Set(hosts)];
 }
+/** Windows: resolve through absolute PATH entries only, never the implicit current-directory search. */
+function pathExecutable(name: string): string[] {
+  if (process.platform !== 'win32') return [name];
+  return (process.env.Path ?? process.env.PATH ?? '').split(';').filter(dir => /^[A-Za-z]:\\/.test(dir)).map(dir => join(dir, `${name}.exe`)).filter(file => existsSync(file));
+}
 function opensslExecutable(explicit?: string): string {
-  const candidates = explicit ? [explicit] : ['openssl', ...(process.platform === 'win32' && process.env.ProgramFiles ? [join(process.env.ProgramFiles, 'Git', 'mingw64', 'bin', 'openssl.exe'), join(process.env.ProgramFiles, 'OpenSSL-Win64', 'bin', 'openssl.exe')] : [])];
+  if (explicit !== undefined && !isAbsolute(explicit)) throw new HostError('openssl_required');
+  const candidates = explicit ? [explicit] : [...pathExecutable('openssl'), ...(process.platform === 'win32' && process.env.ProgramFiles ? [join(process.env.ProgramFiles, 'Git', 'mingw64', 'bin', 'openssl.exe'), join(process.env.ProgramFiles, 'OpenSSL-Win64', 'bin', 'openssl.exe')] : [])];
   for (const executable of candidates) {
     const result = spawnSync(executable, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
     if (result.status === 0 && /^OpenSSL 3\./.test(result.stdout)) return executable;
@@ -69,11 +76,11 @@ export async function setupDirect(options: DirectSetupOptions): Promise<{ baseUr
   await privateDirectory(dir); await privateDirectory(join(dir, 'state')); await privateDirectory(join(dir, 'invitations'));
   const certPath = join(dir, 'tls-cert.pem'), keyPath = join(dir, 'tls-key.pem');
   // Node 24 X509Certificate is read/verify-only. Use vetted OpenSSL, never custom ASN.1.
-  const generated = spawnSync(openssl, ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-sha256', '-nodes', '-days', '825', '-keyout', keyPath, '-out', certPath, '-subj', '/CN=DSH Mobile companion', '-addext', `subjectAltName=${hosts.map(host => `${isIP(host) ? 'IP' : 'DNS'}:${host}`).join(',')}`, '-addext', 'basicConstraints=critical,CA:FALSE', '-addext', 'keyUsage=critical,digitalSignature', '-addext', 'extendedKeyUsage=serverAuth'], { stdio: 'ignore', windowsHide: true, timeout: 30000 });
+  const generated = spawnSync(openssl, ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-sha256', '-nodes', '-days', '825', '-keyout', keyPath, '-out', certPath, '-subj', '/CN=DSH Anywhere companion', '-addext', `subjectAltName=${hosts.map(host => `${isIP(host) ? 'IP' : 'DNS'}:${host}`).join(',')}`, '-addext', 'basicConstraints=critical,CA:FALSE', '-addext', 'keyUsage=critical,digitalSignature', '-addext', 'extendedKeyUsage=serverAuth'], { stdio: 'ignore', windowsHide: true, timeout: 30000 });
   if (generated.status !== 0) throw new HostError('invalid_config');
   await protectNewFile(certPath); await protectNewFile(keyPath);
   await assertPrivate(certPath); await assertPrivate(keyPath);
-  const raw: LocalHostConfiguration = { dshVersion: version, hostName: options.hostName ?? 'DSH Mobile companion', workspaceSource: 'dsh-registry', bind, port, statePath: join(dir, 'state', 'host.sqlite'), tls: { certPath, keyPath }, publicUrl: baseUrl, includeCertificatePem: true };
+  const raw: LocalHostConfiguration = { dshVersion: version, hostName: options.hostName ?? 'DSH Anywhere companion', workspaceSource: 'dsh-registry', bind, port, statePath: join(dir, 'state', 'host.sqlite'), tls: { certPath, keyPath }, publicUrl: baseUrl, includeCertificatePem: true };
   const prepared = await prepareConfiguration(raw), cert = new X509Certificate(await readFile(certPath, 'utf8'));
   if (cert.ca || !cert.verify(cert.publicKey) || !cert.keyUsage?.includes('1.3.6.1.5.5.7.3.1')) throw new HostError('invalid_config');
   await privateWrite(configPath, JSON.stringify({ ...prepared.config, dshVersion: version, workspaces: undefined }, null, 2) + '\n');

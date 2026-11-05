@@ -1,0 +1,5 @@
+"done" = "Done";
+"scan_title" = "Scan the pairing code";
+"notify_answer" = "Answer ready";
+"notify_failed" = "Stopped with an error";
+"notify_decision" = "Agent needs your decision";

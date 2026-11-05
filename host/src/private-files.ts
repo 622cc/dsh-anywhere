@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { chmod, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, parse, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
 import { HostError } from './errors.ts';
 
 /** Reject redirected ancestors, network paths/ADS and Git before writing secrets. */
@@ -24,6 +24,12 @@ export async function privatePath(path: string): Promise<string> {
   // append the not-yet-created suffix to the nearest existing ancestor.
   return resolve(await realpath(existing), relative(existing, full));
 }
+/** Absolute Windows PowerShell 5.1: a bare name lets CreateProcess search the working directory first. */
+export function windowsPowerShell(): string {
+  const root = process.env.SystemRoot ?? process.env.windir;
+  if (!root || !/^[A-Za-z]:\\[^:]*$/.test(root)) throw new HostError('unsafe_private_path');
+  return join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
 function windowsAcl(path: string, create: boolean, directory: boolean): void {
   // Native ACLs, not chmod: only the current user's SID gets FullControl.
   // Paths are environment data, never PowerShell source interpolation.
@@ -39,7 +45,7 @@ if ($env:DSHM_ACL_CREATE -eq '1') {
 $walk=$p; while ($walk) { if ((Get-Item -LiteralPath $walk -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Redirected path' }; $walk=Split-Path -Path $walk -Parent }; 
 $a=Get-Acl -LiteralPath $p; $rules=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]));
 if ($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $sid.Value -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -cne $sid.Value -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl') { throw 'Unsafe ACL' }`;
-  try { execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { env: { ...process.env, DSHM_PRIVATE_PATH: path, DSHM_ACL_CREATE: create ? '1' : '0', DSHM_ACL_DIRECTORY: directory ? '1' : '0' }, stdio: 'ignore', windowsHide: true, timeout: 15000 }); }
+  try { execFileSync(windowsPowerShell(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { env: { ...process.env, DSHM_PRIVATE_PATH: path, DSHM_ACL_CREATE: create ? '1' : '0', DSHM_ACL_DIRECTORY: directory ? '1' : '0' }, stdio: 'ignore', windowsHide: true, timeout: 15000 }); }
   catch { throw new HostError('unsafe_private_path'); }
 }
 export async function assertPrivate(path: string): Promise<void> {

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="done">완료</string>
+    <string name="app_label">DSH</string>
+    <string name="channel_answers">답변 완료</string>
+    <string name="channel_decisions">에이전트의 결정 요청</string>
+    <string name="channel_watching">백그라운드에서 계속 확인</string>
+    <string name="notify_answer">답변 완료</string>
+    <string name="notify_failed">오류로 중지됨</string>
+    <string name="notify_decision">에이전트가 결정을 기다리고 있습니다</string>
+    <string name="watching">DSH가 채팅을 확인하고 있습니다</string>
+    <string name="watching_stop">중지</string>
+</resources>

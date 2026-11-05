@@ -1,0 +1,5 @@
+"done" = "완료";
+"scan_title" = "페어링 코드 스캔";
+"notify_answer" = "답변 완료";
+"notify_failed" = "오류로 중지됨";
+"notify_decision" = "에이전트가 결정을 기다리고 있습니다";

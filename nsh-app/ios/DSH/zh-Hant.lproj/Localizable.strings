@@ -1,0 +1,5 @@
+"done" = "完成";
+"scan_title" = "掃描配對碼";
+"notify_answer" = "回答已完成";
+"notify_failed" = "因錯誤而停止";
+"notify_decision" = "代理需要你做決定";

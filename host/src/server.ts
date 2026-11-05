@@ -7,6 +7,9 @@ import { NotificationFeed } from './notifications.ts';
 import { HISTORY_CUT_NOTICE } from './dsh-adapter.ts';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { takeCredential } from './dsh-relay.ts';
+import type { DshRelay } from './dsh-relay.ts';
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import type { Server as HttpsServer } from 'node:https';
@@ -20,6 +23,14 @@ import type { FileUploadReservation, HostAdapter, HostConfiguration, PreparedHos
 import { isRequestId } from './state.ts';
 import { createRelayConnector } from './relay-connector.ts';
 import type { RelayConnector } from './relay-connector.ts';
+import { createTailcatConnector } from './tailcat-connector.ts';
+import type { TailcatConnector, TailcatHelperCommand } from './tailcat-connector.ts';
+import { STEP_KINDS, STEP_STATUSES, TOOL_NAME, windowMessages } from './step-presentation.ts';
+import { createFolders, FolderError } from './folders.ts';
+import { homedir } from 'node:os';
+import { computerName } from './computer-name.ts';
+/** The computer's name for the phone's Settings, looked up once. */
+let naming: Promise<string> | undefined;
 
 export interface HostServerOptions {
   config: HostConfiguration;
@@ -32,16 +43,30 @@ export interface HostServerOptions {
   heartbeatMs?: number;
   /** Test-only loopback outer WS. Inner listener always remains HTTPS in relay mode. */
   allowInsecureRelayLoopback?: boolean;
+  /** Test-only fake Tailcat helper; production always runs the configured or bundled binary. */
+  tailcatHelper?: TailcatHelperCommand;
+  /** DSH's own protocol for the owner's phone under /dsh (dsh-relay.ts); read per request, available once DSH's web server is. */
+  dsh?: () => DshRelay | undefined;
+  /** Test-only stand-in for the owner's home folder, the top of the phone's folder picker (folders.ts). */
+  folderHome?: string;
 }
 export interface MobileHostServer {
   readonly server: HttpServer | HttpsServer;
   readonly state: HostState;
   readonly config: PreparedHostConfiguration;
   readonly relay?: RelayConnector;
+  readonly tailcat?: TailcatConnector;
   start(): Promise<{ baseUrl: string }>;
   close(): Promise<void>;
 }
 const BODY_LIMIT = 64 * 1024;
+/** The companion's own calls under /dsh/companion, in DSH's call envelope: argument keys, which are required, and whether
+ * the call changes the computer (then the device needs execute as well as read, for every workspace). */
+const COMPANION_CALLS: Record<string, { keys: string[]; required: string[]; execute: boolean }> = {
+  'folders/list': { keys: ['path'], required: [], execute: false },
+  'folders/check': { keys: ['path'], required: ['path'], execute: false },
+  'folders/create': { keys: ['path', 'name'], required: ['path', 'name'], execute: true },
+};
 
 class RateLimiter {
   private readonly entries = new Map<string, { count: number; until: number }>();
@@ -57,6 +82,18 @@ class RateLimiter {
     }
     if (++entry.count > limit) throw new HostError('rate_limited');
   }
+  /** Read-only check: an exhausted key stays blocked without growing the table. */
+  exhausted(key: string, limit: number): boolean {
+    const entry = this.entries.get(key);
+    return !!entry && entry.until > Date.now() && entry.count >= limit;
+  }
+}
+const AUTH_FAILURES_PER_PEER = 30;
+/** Upstream may store by display name on Windows: no ADS, device names or silently trimmed suffixes. */
+export function portableUploadName(name: string): string {
+  let safe = name.replace(/[<>:"|?*]/g, '_').replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(\.|$)/i.test(safe)) safe = `_${safe}`;
+  return safe || 'upload';
 }
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
@@ -100,13 +137,20 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
   const prepared = await prepareConfiguration(options.config, { allowInsecureRelayLoopback: options.allowInsecureRelayLoopback === true });
   const config = prepared.config, adapter = options.adapter;
   const workspaceSource = options.workspaceSource ?? await createWorkspaceSource(config);
+  const folders = createFolders({ home: options.folderHome ?? homedir(), roots: async () => (await workspaceSource.list()).map(workspace => workspace.path) });
   if (options.heartbeatMs !== undefined && (!Number.isInteger(options.heartbeatMs) || options.heartbeatMs < 10 || options.heartbeatMs > 20_000)) throw new HostError('invalid_config');
   const state = options.state ?? new HostState(config.statePath);
   if (state.path !== config.statePath) { if (!options.state) state.close(); throw new HostError('invalid_config'); }
   const relay = config.relay ? createRelayConnector({ relay: config.relay, state, targetPort: config.port, allowInsecureLoopback: options.allowInsecureRelayLoopback === true }) : undefined;
+  // Fails closed (tailcat_helper_missing) before binding when the platform helper is absent.
+  let tailcat: TailcatConnector | undefined;
+  try { tailcat = config.tailcat ? createTailcatConnector({ tailcat: config.tailcat, state, targetPort: config.port, hostName: config.hostName, ...(options.tailcatHelper ? { helper: options.tailcatHelper } : {}) }) : undefined; }
+  catch (error) { if (!options.state) state.close(); throw error; }
   let notifications: NotificationFeed | undefined;
   const notificationStreams = new Set<string>();
   const limits = new RateLimiter();
+  // Separate table: unauthenticated peers can never evict or exhaust authenticated device quotas.
+  const authFailures = new RateLimiter();
   const shutdown = new AbortController();
   let closing = false, started: Promise<{ baseUrl: string }> | undefined;
   let claimed = false;
@@ -281,12 +325,14 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     const session = sessionForDevice(snapshot.session, deviceId, ids);
     const correlation = correlationForDevice(deviceId);
     const mobileId = (id: string): string => correlation.get(id) ?? id;
-    const messages = snapshot.messages.slice(-100).map(message => {
+    const messages = windowMessages(snapshot.messages, 100).messages.map(message => {
       if (!message || typeof message.id !== 'string' || typeof message.text !== 'string' || !['user', 'assistant', 'system'].includes(message.role) || !Number.isFinite(message.createdAt)) throw new HostError('internal_error');
-      if ((message.kind !== undefined && !['message', 'agent_event', 'context'].includes(message.kind)) ||
+      if ((message.kind !== undefined && !['message', 'agent_event', 'context', 'step', 'thought'].includes(message.kind)) ||
+          (message.kind === 'step') !== (message.step !== undefined) ||
+          (message.step !== undefined && (typeof message.step.callId !== 'string' || Buffer.byteLength(message.step.callId) > 256 || !TOOL_NAME.test(message.step.tool) || !STEP_KINDS.has(message.step.kind) || !STEP_STATUSES.has(message.step.status))) ||
           (message.serviceText !== undefined && typeof message.serviceText !== 'string')) throw new HostError('internal_error');
       if (message.delivery !== undefined && !['queue', 'steer'].includes(message.delivery)) throw new HostError('internal_error');
-      return { ...(message.delivery !== undefined ? { delivery: message.delivery } : {}), ...(message.attachments ? { attachments: safeAttachmentRefs(message.attachments) } : {}), ...(message.kind !== undefined ? { kind: message.kind } : {}), ...(message.serviceText !== undefined ? { serviceText: message.serviceText } : {}), id: message.id, role: message.role, text: message.text, createdAt: message.createdAt, ...(message.requestId && isRequestId(message.requestId) ? { requestId: mobileId(message.requestId) } : {}), ...(message.provisional === true ? { provisional: true } : {}) };
+      return { ...(message.delivery !== undefined ? { delivery: message.delivery } : {}), ...(message.attachments ? { attachments: safeAttachmentRefs(message.attachments) } : {}), ...(message.kind !== undefined ? { kind: message.kind } : {}), ...(message.step ? { step: { callId: message.step.callId, tool: message.step.tool, kind: message.step.kind, status: message.step.status } } : {}), ...(message.serviceText !== undefined ? { serviceText: message.serviceText } : {}), id: message.id, role: message.role, text: message.text, createdAt: message.createdAt, ...(message.requestId && isRequestId(message.requestId) ? { requestId: mobileId(message.requestId) } : {}), ...(message.provisional === true ? { provisional: true } : {}) };
     });
     const detail = snapshot.activityDetail;
     if (detail !== undefined && (!detail || !Number.isSafeInteger(detail.turnStartedAt) || detail.turnStartedAt < 0 ||
@@ -296,7 +342,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     const runningSubagents = childCount(snapshot.runningSubagents);
     if (runningSubagents !== undefined && session.runningSubagents !== undefined && runningSubagents !== session.runningSubagents) throw new HostError('internal_error');
     const count = runningSubagents ?? session.runningSubagents;
-    const result = { ...(snapshot.model !== undefined ? { model: sessionModel(snapshot.model) } : {}), ...(snapshot.resolvedQuestions !== undefined ? { resolvedQuestions: settledQuestions(snapshot.resolvedQuestions) } : {}), ...(snapshot.pendingQueue ? { pendingQueue: safeQueue(snapshot.pendingQueue).map(q => ({ ...q, ...(q.requestId ? { requestId: mobileId(q.requestId) } : {}) })) } : {}), ...(snapshot.pendingQuestions ? { pendingQuestions: questionsOf(snapshot.pendingQuestions) } : {}), ...(count !== undefined ? { runningSubagents: count } : {}), ...(activityDetail ? { activityDetail } : {}), session, messages, cursor: snapshot.cursor, hasMore: snapshot.hasMore === true || snapshot.messages.length > 100, activity: snapshot.activity, ...(snapshot.notice === HISTORY_CUT_NOTICE ? { notice: HISTORY_CUT_NOTICE } : snapshot.activity === 'unknown' || (snapshot.activity === 'waiting' && !snapshot.pendingQuestions?.length) ? { notice: 'Return to the desktop to check this task.' } : {}) };
+    const result = { ...(snapshot.model !== undefined ? { model: sessionModel(snapshot.model) } : {}), ...(snapshot.resolvedQuestions !== undefined ? { resolvedQuestions: settledQuestions(snapshot.resolvedQuestions) } : {}), ...(snapshot.pendingQueue ? { pendingQueue: safeQueue(snapshot.pendingQueue).map(q => ({ ...q, ...(q.requestId ? { requestId: mobileId(q.requestId) } : {}) })) } : {}), ...(snapshot.pendingQuestions ? { pendingQuestions: questionsOf(snapshot.pendingQuestions) } : {}), ...(count !== undefined ? { runningSubagents: count } : {}), ...(activityDetail ? { activityDetail } : {}), session, messages, cursor: snapshot.cursor, hasMore: snapshot.hasMore === true || windowMessages(snapshot.messages, 100).cut, activity: snapshot.activity, ...(snapshot.notice === HISTORY_CUT_NOTICE ? { notice: HISTORY_CUT_NOTICE } : snapshot.activity === 'unknown' || (snapshot.activity === 'waiting' && !snapshot.pendingQuestions?.length) ? { notice: 'Return to the desktop to check this task.' } : {}) };
     // Keep complete messages and Unicode intact. Observation is a bounded latest-history view.
     while (Buffer.byteLength(JSON.stringify(result), 'utf8') > 2 * 1024 * 1024) {
       if (result.messages.length <= 1) throw new HostError('payload_too_large');
@@ -351,11 +397,18 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     return snapshot;
   }
 
-  const streams = new Set<{ deviceId: string; stop: () => void }>();
+  const streams = new Set<{ deviceId: string; kind: 'chat' | 'notification'; stop: () => void }>();
   const streamCounts = new Map<string, number>();
-  const onRevoke = state.onRevoke(deviceId => { pruneUploads(deviceId); for (const stream of streams) if (stream.deviceId === deviceId) stream.stop(); });
+  const onRevoke = state.onRevoke(deviceId => { tailcat?.sweep(); pruneUploads(deviceId); for (const stream of streams) if (stream.deviceId === deviceId) stream.stop(); });
   async function streamSnapshots(sessionId: string, deviceId: string, res: ServerResponse, requestSignal: AbortSignal): Promise<void> {
-    if ((streamCounts.get(deviceId) ?? 0) >= 3 || streams.size >= 32) throw new HostError('rate_limited');
+    // A phone shows one chat at a time. Its previous stream may still hold a slot when it reopens
+    // (the close travels through Tailcat), so the newest chat stream wins over the device's oldest.
+    while ((streamCounts.get(deviceId) ?? 0) >= 3) {
+      const oldest = [...streams].find(stream => stream.deviceId === deviceId && stream.kind === 'chat');
+      if (!oldest) throw new HostError('rate_limited');
+      oldest.stop();
+    }
+    if (streams.size >= 32) throw new HostError('rate_limited');
     streamCounts.set(deviceId, (streamCounts.get(deviceId) ?? 0) + 1);
     const controller = new AbortController();
     let timer: ReturnType<typeof setInterval> | undefined, closed = false;
@@ -371,7 +424,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       res.off('close', stop);
       if (res.headersSent && !res.destroyed) res.end();
     };
-    const registration = { deviceId, stop }; streams.add(registration);
+    const registration = { deviceId, kind: 'chat' as const, stop }; streams.add(registration);
     requestSignal.addEventListener('abort', stop, { once: true }); res.once('close', stop);
     if (requestSignal.aborted) { stop(); return; }
     let lastFrame = '';
@@ -473,7 +526,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       const count = (streamCounts.get(deviceId) ?? 1) - 1; if (count) streamCounts.set(deviceId, count); else streamCounts.delete(deviceId);
       signal.removeEventListener('abort', stop); res.off('close', stop); if (res.headersSent && !res.destroyed) res.end();
     };
-    const registration = { deviceId, stop }; streams.add(registration);
+    const registration = { deviceId, kind: 'notification' as const, stop }; streams.add(registration);
     signal.addEventListener('abort', stop, { once: true }); res.once('close', stop);
     let cursor = after, heartbeat = Date.now(), lastCoverage = '';
     async function send(first = false) {
@@ -515,12 +568,55 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     catch (error) { stop(); throw error; }
   }
 
+  /** DSH's API is owner access: only a device granted every workspace may use the relay. */
+  function ownerRelay(device: AuthorizedDevice): DshRelay {
+    const { readWorkspaceIds, executeWorkspaceIds } = device.grants;
+    if (!readWorkspaceIds.includes('*') || !executeWorkspaceIds.includes('*')) throw new HostError('forbidden');
+    const relay = options.dsh?.();
+    if (!relay) throw new HostError('unavailable');
+    return relay;
+  }
+
   function authorized(req: IncomingMessage): AuthorizedDevice {
+    // Relay and Tailcat tunnels all arrive from loopback after transport access checks; never lock them out as one peer.
+    const peer = req.socket.remoteAddress ?? 'unknown';
+    const key = (relay || tailcat) && /^(127\.|::1$|::ffff:127\.)/.test(peer) ? undefined : `auth-fail:${peer}`;
     const header = req.headers.authorization;
-    if (typeof header !== 'string' || !/^Bearer [A-Za-z0-9_-]{43}$/.test(header)) throw new HostError('unauthorized');
-    const device = state.authenticate(header.slice(7));
-    if (!device) throw new HostError('unauthorized');
-    return device;
+    // A valid credential always wins, so a peer sharing the address (NAT) cannot lock a paired phone out.
+    const device = typeof header === 'string' && /^Bearer [A-Za-z0-9_-]{43}$/.test(header) ? state.authenticate(header.slice(7)) : undefined;
+    if (device) return device;
+    if (key && authFailures.exhausted(key, AUTH_FAILURES_PER_PEER)) throw new HostError('rate_limited');
+    if (key) try { authFailures.take(key, AUTH_FAILURES_PER_PEER); } catch { /* table full: still unauthorized */ }
+    throw new HostError('unauthorized');
+  }
+
+  /** Folders for the phone's folder picker. Browsing the computer goes beyond any one workspace, so it needs a device
+   * granted every workspace: read to list and check, execute too to create. */
+  async function companionCall(device: AuthorizedDevice, req: IncomingMessage, res: ServerResponse, url: URL, signal: AbortSignal): Promise<void> {
+    const method = url.pathname.slice('/companion/'.length), spec = COMPANION_CALLS[method];
+    if (req.method !== 'POST' || !spec || url.search) throw new HostError('not_found');
+    limits.take(`device:${device.deviceId}`, 120);
+    const { readWorkspaceIds, executeWorkspaceIds } = freshDevice(device.deviceId).grants;
+    if (!readWorkspaceIds.includes('*') || (spec.execute && !executeWorkspaceIds.includes('*'))) throw new HostError('forbidden');
+    const body = await bodyJson(req, signal); keys(body, ['type', 'rpcId', 'method', 'payload']);
+    const payload = body.payload as Record<string, unknown> | null, rpcId = body.rpcId;
+    if (body.type !== 'client-request' || body.method !== method || typeof rpcId !== 'string' || rpcId.length > 128 || !payload || typeof payload !== 'object' || Array.isArray(payload)) throw new HostError('invalid_request');
+    keys(payload, ['args']);
+    const args = payload.args as Record<string, unknown> | null;
+    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new HostError('invalid_request');
+    keys(args, spec.keys, spec.required);
+    if (Object.values(args).some(value => typeof value !== 'string' || value.length > 4096)) throw new HostError('invalid_request');
+    const path = args.path as string | undefined;
+    let value: unknown;
+    try {
+      value = method === 'folders/list' ? await folders.list(path, signal) : method === 'folders/check' ? await folders.check(path!) : await folders.create(path!, args.name as string);
+    } catch (error) {
+      if (!(error instanceof FolderError)) throw error;
+      signal.throwIfAborted();
+      sendJson(res, 200, { type: 'server-response', rpcId, result: { ok: false, error: { code: error.code, message: error.message, details: { path: error.path } } } }); return;
+    }
+    signal.throwIfAborted(); freshDevice(device.deviceId);
+    sendJson(res, 200, { type: 'server-response', rpcId, result: { ok: true, value } });
   }
 
   async function route(req: IncomingMessage, res: ServerResponse, signal: AbortSignal): Promise<void> {
@@ -528,6 +624,14 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
     if (closing) throw new HostError('unavailable');
     // No browser surface, cookies, CORS or query credentials. A native client has no Origin.
     if (req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined) throw new HostError('forbidden');
+    if (req.url?.startsWith('/dsh/')) {
+      const url = new URL(req.url.slice(4), 'http://localhost'); takeCredential(req, url, false);
+      const device = authorized(req);
+      if (url.pathname.startsWith('/companion/')) { await companionCall(device, req, res, url, signal); return; }
+      ownerRelay(device);
+      if (!options.dsh?.()?.serve(req, res, url)) throw new HostError('not_found');
+      return;
+    }
     if (!req.url?.startsWith('/v1/') || req.url.length > 2048 || /[#\x00-\x20\\]/.test(req.url)) throw new HostError('invalid_request');
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname + url.search !== req.url) throw new HostError('invalid_request');
@@ -600,7 +704,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       sendJson(res, 200, { items: workspaces.filter(workspace => allowsWorkspace(current.grants.readWorkspaceIds, workspace.id)).map(workspace => ({ id: workspace.id, name: workspace.name, canExecute: allowsWorkspace(current.grants.executeWorkspaceIds, workspace.id) })) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/v1/capabilities') {
-      sendJson(res, 200, { protocolVersion: 1, hostVersion: HOST_VERSION, hostName: config.hostName, upstreamVersion: adapter.upstreamVersion, capabilities: { sessions: true, textPrompt: true, cancel: true, liveSnapshots: true, questionSkip: false, fileDownload: false, ...(adapter.phoneCapabilities?.() ?? { attachments: false, questions: false, steer: false, queue: false, rename: false, models: false }), approvals: false, push: false, notifications: !!notifications }, notificationCapabilities: { version: 1, coverage: notifications?.coverage ?? 'degraded', feed: !!notifications, unifiedPush: false, retentionMs: 604800000 } }); return;
+      sendJson(res, 200, { protocolVersion: 1, hostVersion: HOST_VERSION, hostName: config.hostName, computerName: await (naming ??= computerName()), upstreamVersion: adapter.upstreamVersion, capabilities: { sessions: true, textPrompt: true, cancel: true, liveSnapshots: true, questionSkip: false, fileDownload: false, ...(adapter.phoneCapabilities?.() ?? { attachments: false, questions: false, steer: false, queue: false, rename: false, models: false }), approvals: false, push: false, notifications: !!notifications }, notificationCapabilities: { version: 1, coverage: notifications?.coverage ?? 'degraded', feed: !!notifications, unifiedPush: false, retentionMs: 604800000 } }); return;
     }
     if (req.method === 'GET' && url.pathname === '/v1/models') {
       if (!adapter.models) throw new HostError('unavailable');
@@ -656,6 +760,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       const size = Number(length); if (size > UPLOAD_LIMIT) throw new HostError('payload_too_large');
       let name: string; try { name = decodeURIComponent(String(req.headers['x-file-name'] ?? 'upload')); } catch { throw new HostError('invalid_request'); }
       if (!name || Buffer.byteLength(name) > 256 || /[\\/\x00-\x1f\x7f]/.test(name) || name === '.' || name === '..') throw new HostError('invalid_request');
+      name = portableUploadName(name); if (Buffer.byteLength(name) > 256) throw new HostError('invalid_request');
       pruneUploads(); await Promise.all([...cleanups]);
       // Images retain validated base64; files stay private on disk until send.
       // Reserve image bytes synchronously before concurrent intake.
@@ -871,23 +976,49 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
   server.headersTimeout = 65_000;
   server.keepAliveTimeout = 60_000;
   server.maxHeadersCount = 32;
+  // Bounded concurrent sockets; streams, uploads and reads have tighter per-device caps.
+  server.maxConnections = 256;
+  // The relay's WebSocket (/dsh/api/remote.mux): NSH sockets cannot send Authorization, so the token may ride the query here only.
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const refuse = (status: number, text: string) => socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`);
+    if (closing || !req.url?.startsWith('/dsh/') || req.headers.origin !== undefined) return refuse(404, 'Not Found');
+    const url = new URL(req.url.slice(4), 'http://localhost');
+    const token = takeCredential(req, url, true);
+    const device = token && /^[A-Za-z0-9_-]{43}$/.test(token) ? state.authenticate(token) : undefined;
+    if (!device) return refuse(401, 'Unauthorized');
+    let relay: DshRelay;
+    try { relay = ownerRelay(device); } catch (error) { return refuse(publicError(error).status, 'Refused'); }
+    if (!relay.upgrade(req, socket, head, url)) refuse(404, 'Not Found');
+  });
   server.on('clientError', (_error, socket) => { if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); });
   const host: MobileHostServer = {
-    server, state, config, ...(relay ? { relay } : {}),
+    server, state, config, ...(relay ? { relay } : {}), ...(tailcat ? { tailcat } : {}),
     start() {
       if (closing) return Promise.reject(new HostError('unavailable'));
       started ??= (async () => {
-        state.claimRuntime(); claimed = true;
+        // A hot reload starts this companion while the previous one may still hold the state lock: wait for it (15 s).
+        for (let waited = 0; ; waited += 300) {
+          try { state.claimRuntime(); break; } catch (error) {
+            if (!(error instanceof HostError) || error.code !== 'conflict' || waited >= 15_000 || closing) throw error;
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+        }
+        claimed = true;
         await files.startup(await workspaceSource.list());
         if (relay) state.recoverPendingRelayPublications();
         const sources = adapter.notifications?.();
         if (sources) { notifications = new NotificationFeed(state, sources); await notifications.start(); }
-        await new Promise<void>((resolve, reject) => {
-          const failed = () => { state.releaseRuntime(); claimed = false; reject(new HostError('unavailable')); };
-          server.once('error', failed);
-          server.listen(config.port, config.bind, () => { server.off('error', failed); resolve(); });
-        });
-        relay?.start();
+        // A hot reload starts this companion while the previous one is still closing: wait for its port (15 s).
+        for (let waited = 0; ; waited += 300) {
+          const error = await new Promise<NodeJS.ErrnoException | undefined>(resolve => {
+            server.once('error', resolve);
+            server.listen(config.port, config.bind, () => { server.off('error', resolve); resolve(undefined); });
+          });
+          if (!error) break;
+          if (error.code !== 'EADDRINUSE' || waited >= 15_000 || closing) { state.releaseRuntime(); claimed = false; throw new HostError('unavailable'); }
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        relay?.start(); tailcat?.start();
         const address = server.address();
         if (!address || typeof address === 'string') throw new HostError('unavailable');
         return { baseUrl: `${prepared.tls ? 'https' : 'http'}://${config.bind === '::1' ? '[::1]' : config.bind}:${address.port}` };
@@ -899,7 +1030,7 @@ export async function createHostServer(options: HostServerOptions): Promise<Mobi
       closing = true; pumpUploads(); shutdown.abort(); clearInterval(uploadSweep); for (const id of uploads.keys()) removeUpload(id);
       await Promise.all([...cleanups]).catch(() => {}); await files.close().catch(() => {});
       await notifications?.close();
-      await relay?.close();
+      await relay?.close(); await tailcat?.close();
       for (const stream of streams) stream.stop();
       onRevoke();
       // A host stop must not cancel upstream work. Preserve all in-flight outcomes as uncertain

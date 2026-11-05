@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- Adaptive launcher icon background, «Агент» signal green. Kept separate from
-         launcher_background, which the window theme also uses for the navigation bar. -->
-    <color name="ic_launcher_background">#1FA463</color>
-</resources>

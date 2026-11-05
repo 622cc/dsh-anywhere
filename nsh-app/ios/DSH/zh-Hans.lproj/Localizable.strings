@@ -1,0 +1,5 @@
+"done" = "完成";
+"scan_title" = "扫描配对码";
+"notify_answer" = "回答已完成";
+"notify_failed" = "因错误而停止";
+"notify_decision" = "智能体需要你做决定";

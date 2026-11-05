@@ -13,7 +13,8 @@ import type { ChatMessage, FileUploadReservation, HostAdapter, HostSession, Host
 
 import type { NotificationEvidence, NotificationSource, NotificationSources } from './notifications.ts';
 import { isCompatibleDshVersion } from './compatibility.ts';
-export { COMPATIBLE_DSH_VERSIONS } from './compatibility.ts';
+import { isActivity, reasoningText, stepTitle, TOOL_NAME, windowMessages } from './step-presentation.ts';
+export { SUPPORTED_DSH_VERSIONS } from './compatibility.ts';
 const MAX_MESSAGES = 100;
 // Includes the opening page. page() is message-aligned, so event/byte counts vary.
 const MAX_HISTORY_PAGES = 16;
@@ -103,6 +104,8 @@ export interface DshAdapterOptions {
   runningSubagentCounts?: () => ReadonlyMap<string, number>;
   pollIntervalMs?: number;
   throttleMs?: number;
+  /** Longest wait for DSH's first follow frame (default 15 s). rc.2/rc.3 can stall a fresh follow. */
+  openTimeoutMs?: number;
 }
 const phoneProjections = new WeakMap<Transcript, PhoneProjection>();
 // No upstream API discards an unbound receipt. Keep a service-lifetime budget,
@@ -153,20 +156,20 @@ function receiptBudget(service: object): ReceiptBudget {
 }
 interface CanonicalWorkspace extends WorkspaceConfig { key: string }
 interface WireEvent { type: string; seq: number; time: number; data: unknown; ignorable?: true; surfaceOp?: unknown }
-interface SurfaceNode { seq: number; message?: ChatMessage; answerTurn?: number }
+interface SurfaceNode { seq: number; message?: ChatMessage; answerTurn?: number; thought?: ChatMessage; callId?: string }
 interface Provisional { id: string; turn: number; step: number; nextIndex: number; createdAt: number; blocks: Map<number, string> }
 const KNOWN_LOG_TYPES = new Set([
   'agent-preset/selected', 'agent/inbox/spliced', 'approval/asked', 'approval/decided', 'approval/policy',
   'assistant/attempt', 'command/done', 'command/run', 'compaction/end', 'compaction/prune', 'compaction/start',
   'compaction/summary', 'deliverables/presented', 'feedback/message-delete', 'feedback/message-put', 'feedback/record',
-  'goal/change', 'hook/invoked', 'hook/result', 'image/offload', 'llm/retry', 'llm/retry-started', 'model/selection',
+  'goal/change', 'hook/invoked', 'hook/result', 'image/offload', 'job/registered', 'job/settled', 'llm/retry', 'llm/retry-started', 'model/selection',
   'permission/preset', 'plan/mode', 'request/context', 'request/header', 'sandbox/mode', 'schedule/change',
   'session-log-deepseek/delivery-accepted', 'session/end-seed', 'session/title', 'session/title-llm-request',
   'step/end', 'step/start', 'subagent/catalog', 'subagent/descriptor', 'subagent/model-selection-policy',
   'team/member', 'team/message/delivered', 'team/message/queued', 'team/task', 'todo/write',
   'tool-workflow/agent-end', 'tool-workflow/agent-start', 'tool-workflow/run-end', 'tool-workflow/run-start',
   'tool/call', 'tool/ptc-dispatch', 'tool/ptc-dispatch-start', 'turn/end', 'turn/start',
-  'web/deepseek-search-llm-request', 'workspace/changes',
+  'web/deepseek-search-llm-request', 'working-directory/change', 'workspace/changes',
 ]);
 const WAIT_NOTICE = 'A question or approval needs attention in DSH on the desktop. Mobile answers are not supported.';
 const UNKNOWN_NOTICE = 'This DSH history contains an unsupported event. Open the desktop to view the authoritative conversation.';
@@ -215,7 +218,10 @@ function applySurface(nodes: SurfaceNode[], event: WireEvent): boolean {
   if (!SURFACE_TYPES.has(event.type)) return true;
   const message = messageOf(event);
   const data = object(event.data);
-  const node = { seq: event.seq, ...(message ? { message } : {}), ...(event.type === 'assistant/message' && message && data?.interrupted !== true && Number.isSafeInteger(data?.turn) ? { answerTurn: data!.turn as number } : {}) };
+  const reasoning = event.type === 'assistant/message' ? reasoningText(object(data?.message)?.content) : '';
+  const thoughtId = object(data?.message)?.id;
+  const thought: ChatMessage | undefined = reasoning && typeof thoughtId === 'string' ? { id: `thought:${thoughtId}`, role: 'assistant', kind: 'thought', text: reasoning, createdAt: event.time } : undefined;
+  const node = { seq: event.seq, ...(message ? { message } : {}), ...(thought ? { thought } : {}), ...(event.type === 'assistant/message' && message && data?.interrupted !== true && Number.isSafeInteger(data?.turn) ? { answerTurn: data!.turn as number } : {}) };
   if (event.surfaceOp === 'append') { nodes.push(node); return true; }
   const op = object(event.surfaceOp);
   if (op?.op !== 'replace' || !Number.isSafeInteger(op.startSeq) || !Number.isSafeInteger(op.endSeq)) throw new HostError('unavailable');
@@ -323,6 +329,23 @@ class Transcript {
     this.trim();
   }
   markGap(): void { this.gap = true; this.attempt = undefined; }
+  /** Tool steps live in timeline order; a result settles its call, a turn end settles what never returned. */
+  private stepEvent(event: WireEvent, data: Record<string, unknown> | undefined): void {
+    if (event.type === 'tool/call' && typeof data?.callId === 'string' && Buffer.byteLength(data.callId) <= 256 && typeof data.name === 'string' && TOOL_NAME.test(data.name)) {
+      const { title, kind } = stepTitle(data.name, data.arguments);
+      this.nodes.push({ seq: event.seq, callId: data.callId, message: { id: `step:${data.callId}`, role: 'assistant', kind: 'step', text: title, createdAt: event.time, step: { callId: data.callId, tool: data.name, kind, status: 'in_progress' } } });
+    } else if (event.type === 'tool/result') {
+      const callId = object(data?.message)?.toolCallId;
+      if (typeof callId === 'string') this.settleSteps(node => node.callId === callId, object(data?.message)?.isError === true ? 'failed' : 'completed');
+    } else if (event.type === 'turn/end') this.settleSteps(() => true, 'failed');
+  }
+  private settleSteps(match: (node: SurfaceNode) => boolean, status: 'completed' | 'failed'): void {
+    for (let index = this.nodes.length - 1; index >= 0; index--) {
+      const node = this.nodes[index]!;
+      if (!node.callId || node.message?.step?.status !== 'in_progress' || !match(node)) continue;
+      this.nodes[index] = { ...node, message: { ...node.message, step: { ...node.message.step, status } } };
+    }
+  }
   get needsResync(): boolean { return this.gap; }
   get needsHistory(): boolean { return this.historyCut && !this.unsupported && !this.gap; }
   accept(observation: DshObservation): void {
@@ -364,6 +387,7 @@ class Transcript {
       const callId = event.type === 'tool/result' ? object(data?.message)?.toolCallId : object(data?.source)?.kind === 'user-question-reply' ? object(data?.source)?.callId : undefined;
       if (typeof callId === 'string') this.phoneQuestions = this.phoneQuestions.filter(q => q.callId !== callId);
     }
+    if (!this.retentionCut) this.stepEvent(event, data);
     if (event.type === 'turn/start') {
       this.activityEstablished = true;
       this.attentionStopped = false; this.approvals.clear(); this.questions.clear(); this.openProjectedQuestions = false;
@@ -443,7 +467,7 @@ class Transcript {
     }
   }
   private trim(): void {
-    const visible = this.nodes.filter((entry) => entry.message);
+    const visible = this.nodes.filter((entry) => entry.message && !isActivity(entry.message));
     if (visible.length > MAX_MESSAGES) {
       const first = visible[visible.length - MAX_MESSAGES]!;
       this.nodes = this.nodes.slice(this.nodes.indexOf(first));
@@ -453,14 +477,14 @@ class Transcript {
   }
   snapshot(): HostSnapshot {
     const ambiguous = this.unsupported || this.retentionCut || this.gap;
-    const messages = ambiguous ? [] : this.nodes.flatMap((node) => node.message ? [{ ...node.message }] : []);
+    const messages = ambiguous ? [] : this.nodes.flatMap((node) => [...(node.thought ? [{ ...node.thought }] : []), ...(node.message ? [{ ...node.message }] : [])]);
     const provisionalText = this.attempt ? [...this.attempt.blocks].sort(([a], [b]) => a - b).map(([, text]) => text).join('') : '';
     if (this.attempt && provisionalText && !ambiguous) messages.push({ id: `provisional:${this.attempt.id}`, role: 'assistant', text: provisionalText, createdAt: this.attempt.createdAt, provisional: true });
     const waiting = this.approvals.size > 0 || this.questions.size > 0 || this.projectedQuestions;
     const knownActivity = !this.unsupported && !this.gap && (!this.historyCut || this.activityEstablished);
     return {
-      session: { ...this.session, running: this.running }, ...(this.session.runningSubagents !== undefined ? { runningSubagents: this.session.runningSubagents } : {}), messages: messages.slice(-MAX_MESSAGES), cursor: this.cursor,
-      hasMore: this.hasMore || messages.length > MAX_MESSAGES,
+      session: { ...this.session, running: this.running }, ...(this.session.runningSubagents !== undefined ? { runningSubagents: this.session.runningSubagents } : {}), messages: windowMessages(messages, MAX_MESSAGES).messages, cursor: this.cursor,
+      hasMore: this.hasMore || windowMessages(messages, MAX_MESSAGES).cut,
       activity: !knownActivity ? 'unknown' : waiting ? 'waiting' : this.running ? 'running' : 'idle',
       ...(knownActivity && this.running && this.turn ? { activityDetail: { turnStartedAt: this.turn.startedAt, ...([...this.calls.values()].at(-1) ? { tool: [...this.calls.values()].at(-1)! } : {}) } } : {}),
       ...(this.unsupported ? { notice: UNKNOWN_NOTICE } : this.historyCut ? { notice: HISTORY_CUT_NOTICE } : this.gap ? { notice: GAP_NOTICE } : waiting ? { notice: WAIT_NOTICE } : {}),
@@ -693,8 +717,12 @@ export class DshAdapter implements HostAdapter {
     const cleanup = new AbortController();
     const readSignal = AbortSignal.any([active, cleanup.signal]);
     const iterator = this.options.sessionController.follow({ address: { kind: 'session', sessionId }, assistantStream: true, maxMessages: MAX_MESSAGES }, readSignal)[Symbol.asyncIterator]();
+    // A stalled first frame must fail this read instead of holding the phone's stream forever.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stalled = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new HostError('unavailable')), this.options.openTimeoutMs ?? 15_000); });
     try {
-      const first = await iterator.next(); active.throwIfAborted();
+      const pending = iterator.next(); pending.catch(() => {});
+      const first = await Promise.race([pending, stalled]); active.throwIfAborted();
       const frame = object(first.value);
       if (first.done || frame?.type !== 'snapshot' || object(frame.header)?.id !== sessionId) throw new HostError('unavailable');
       await admit?.(frame);
@@ -705,8 +733,11 @@ export class DshAdapter implements HostAdapter {
           (remote.code === 'session/agent-busy' && object(remote.details)?.reason === 'use subagent delivery for this child session'))) throw new HostError('not_found');
       throw error;
     } finally {
+      clearTimeout(timer);
       // rc.2 promotes only AFTER its first yield: never request a second frame.
-      cleanup.abort(); await iterator.return?.();
+      cleanup.abort();
+      const closing = iterator.return?.(); closing?.catch(() => {});
+      if (closing) await Promise.race([closing, new Promise(resolve => setTimeout(resolve, 1_000))]);
     }
   }
   private async opening(sessionId: string, active: AbortSignal): Promise<Record<string, unknown>> {
@@ -894,7 +925,7 @@ export class DshAdapter implements HostAdapter {
   async *watch(sessionId: string, signal: AbortSignal): AsyncIterable<HostSnapshot> {
     const active = this.signal(signal);
     const pollMs = this.options.pollIntervalMs ?? 1000;
-    const throttleMs = this.options.throttleMs ?? 100;
+    const throttleMs = this.options.throttleMs ?? 250; // at most ~4 streaming frames per second
     let transcript: Transcript | undefined;
     let changed = false;
     let resync = false;

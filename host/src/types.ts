@@ -12,7 +12,9 @@ export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; createdAt: number;
   attachments?: AttachmentRef[];
   delivery?: import('./phone.ts').Delivery;
-  requestId?: string; provisional?: boolean; kind?: 'message' | 'agent_event' | 'context'; serviceText?: string;
+  requestId?: string; provisional?: boolean; kind?: 'message' | 'agent_event' | 'context' | 'step' | 'thought'; serviceText?: string;
+  /** Present exactly when kind is 'step'. */
+  step?: import('./step-presentation.ts').StepInfo;
 }
 export interface HostSnapshot {
   session: HostSession; messages: ChatMessage[]; cursor: number; hasMore: boolean;
@@ -52,6 +54,8 @@ export interface CommandReceipt {
 }
 export interface DeviceGrants { readWorkspaceIds: string[]; executeWorkspaceIds: string[] }
 export interface RelayConfiguration { url: string; routeId: string; connectorToken: string }
+/** Transport v3 (docs/TAILCAT.md). hostId names the inner TLS identity h-<hostId>.dsh.invalid. */
+export interface TailcatConfiguration { enabled: true; hostId: string; /** Absolute; defaults to the bundled helper for this platform. */ helperPath?: string }
 export interface RelayAccess { accessId: string; accessToken: string; expiresAt: number }
 export interface RelayGrant { accessId: string; tokenHash: string; deviceId: string | null; expiresAt: number; maxStreams: 2 | 8 }
 export interface HostBaseConfiguration {
@@ -63,6 +67,7 @@ export interface HostBaseConfiguration {
   /** Must remain false outside explicit local test/development composition. */
   allowInsecureLoopback?: boolean;
   relay?: RelayConfiguration;
+  tailcat?: TailcatConfiguration;
 }
 /** Omitting workspaceSource preserves the original explicit-list configuration. */
 export type HostConfiguration = HostBaseConfiguration & (

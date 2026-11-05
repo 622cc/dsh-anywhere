@@ -15,10 +15,17 @@ export interface RelayPublication { published: boolean; generation: string | nul
 export interface StoredCommand { receipt: CommandReceipt; httpStatus: number; workspaceId: string | null }
 export interface CommandAdmission extends StoredCommand { fresh: boolean }
 export interface StateOptions { now?: () => number }
+export interface TailcatSnapshot { state: string | null; allowedClients: string[]; address: string | null; running: boolean; updatedAt: number }
+export interface TailcatPairingRequest { id: string; pairingHash: string; offerExpiresAt: number; status: 'requested' | 'open' | 'failed'; createdAt: number; address?: string; clientKey?: string; proof?: string; expiresAt?: number; template?: string }
+export const TAILCAT_CLIENT = /^nodekey:[0-9a-f]{64}$/;
+/** An allowlisted key whose pairing was never consumed stays reachable this long past the offer. */
+const TAILCAT_UNCONSUMED_GRACE_MS = 60_000;
 
 type Row = Record<string, unknown>;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Device credential lifetime for both direct and relay pairings; revocation still applies at any time. */
+const DEVICE_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
 export function isRequestId(value: unknown): value is string { return typeof value === 'string' && UUID.test(value); }
 export function hashSecret(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
 /** '*' is a grant marker, never a mobile workspace id. */
@@ -73,6 +80,8 @@ export class HostState {
     `);
     // Early development databases have no scope column; unknown prior scope fails closed.
     if (!this.db.prepare('PRAGMA table_info(commands)').all().some(column => column.name === 'workspace_id')) this.db.exec('ALTER TABLE commands ADD COLUMN workspace_id TEXT');
+    // NULL = paired before direct-device lifetimes existed; such devices stay valid until revoked.
+    if (!this.db.prepare('PRAGMA table_info(devices)').all().some(column => column.name === 'expires_at')) this.db.exec('ALTER TABLE devices ADD COLUMN expires_at INTEGER');
     if (!this.db.prepare('PRAGMA table_info(devices)').all().some(column => column.name === 'publication_pending')) this.db.exec('ALTER TABLE devices ADD COLUMN publication_pending INTEGER NOT NULL DEFAULT 0');
     this.db.exec(`CREATE TABLE IF NOT EXISTS relay_grants (
       access_id TEXT PRIMARY KEY, route_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
@@ -82,7 +91,16 @@ export class HostState {
       pending_since INTEGER
     ) STRICT;
     CREATE TABLE IF NOT EXISTS relay_status (route_id TEXT PRIMARY KEY, connected INTEGER NOT NULL, ready INTEGER NOT NULL, generation TEXT, updated_at INTEGER NOT NULL) STRICT;
+    CREATE TABLE IF NOT EXISTS tailcat_state (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT, allowed TEXT NOT NULL DEFAULT '[]', address TEXT, running INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL) STRICT;
+    CREATE TABLE IF NOT EXISTS tailcat_clients (public_key TEXT PRIMARY KEY, pairing_hash TEXT, device_id TEXT REFERENCES devices(id), expires_at INTEGER, created_at INTEGER NOT NULL) STRICT;
+    CREATE TABLE IF NOT EXISTS tailcat_pairing_requests (
+      id TEXT PRIMARY KEY, pairing_hash TEXT NOT NULL, offer_expires_at INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('requested','open','failed')),
+      address TEXT, client_key TEXT, proof TEXT, expires_at INTEGER, template TEXT, created_at INTEGER NOT NULL
+    ) STRICT;
     `);
+    const pairingColumns = this.db.prepare('PRAGMA table_info(tailcat_pairing_requests)').all() as { name?: unknown }[];
+    if (!pairingColumns.some(column => column.name === 'template')) this.db.exec('ALTER TABLE tailcat_pairing_requests ADD COLUMN template TEXT');
     this.transaction(() => {
       const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version);
       if (version < 4) {
@@ -157,9 +175,90 @@ export class HostState {
       const deviceId = randomUUID();
       const deviceToken = randomBytes(32).toString('base64url');
       this.db.prepare('UPDATE pairings SET consumed_at=? WHERE token_hash=?').run(this.now(), hashSecret(pairingToken));
-      this.db.prepare('INSERT INTO devices (id, name, token_hash, grants, created_at) VALUES (?, ?, ?, ?, ?)').run(deviceId, deviceName.trim(), hashSecret(deviceToken), String(row.grants), this.now());
+      // Same bounded lifetime as relay device access; the phone treats the resulting 401 as re-pair.
+      this.db.prepare('INSERT INTO devices (id, name, token_hash, grants, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)').run(deviceId, deviceName.trim(), hashSecret(deviceToken), String(row.grants), this.now(), this.now() + DEVICE_LIFETIME_MS);
+      // Transport v3: the phone key allowlisted for this offer now lives exactly as long as the device.
+      this.db.prepare('UPDATE tailcat_clients SET device_id=?,expires_at=NULL WHERE pairing_hash=? AND device_id IS NULL').run(deviceId, hashSecret(pairingToken));
       return { deviceId, deviceToken };
     });
+  }
+
+  /** Invalidate an unused direct offer (CLI failure after creating it). */
+  cancelPairing(pairingToken: string): void {
+    if (TOKEN.test(pairingToken)) this.db.prepare('UPDATE pairings SET consumed_at=? WHERE token_hash=? AND consumed_at IS NULL').run(this.now(), hashSecret(pairingToken));
+  }
+
+  tailcatSnapshot(): TailcatSnapshot {
+    const row = this.db.prepare('SELECT * FROM tailcat_state WHERE id=1').get();
+    return { state: row?.state === undefined || row.state === null ? null : String(row.state), allowedClients: row ? JSON.parse(String(row.allowed)) as string[] : [],
+      address: row?.address ? String(row.address) : null, running: row?.running === 1, updatedAt: row ? Number(row.updated_at) : 0 };
+  }
+  /** Helper persist event. Keys new to the allowlist belong to the open pairing window, else expire now. */
+  /** state is null until the helper's node has chosen a DERP region (fresh identity, no phone yet). */
+  persistTailcat(state: string | null, allowedClients: string[], pairing?: { pairingHash: string; offerExpiresAt: number }): void {
+    if ((state !== null && (typeof state !== 'string' || !state || state.length > 16384)) || !Array.isArray(allowedClients) || allowedClients.length > 64 || allowedClients.some(key => typeof key !== 'string' || !TAILCAT_CLIENT.test(key)) || new Set(allowedClients).size !== allowedClients.length) throw new HostError('invalid_request');
+    this.transaction(() => {
+      this.db.prepare("INSERT INTO tailcat_state (id,state,allowed,updated_at) VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,allowed=excluded.allowed,updated_at=excluded.updated_at").run(state, JSON.stringify([...allowedClients].sort()), this.now());
+      const insert = this.db.prepare('INSERT OR IGNORE INTO tailcat_clients (public_key,pairing_hash,device_id,expires_at,created_at) VALUES (?,?,NULL,?,?)');
+      for (const key of allowedClients) insert.run(key, pairing?.pairingHash ?? null, pairing ? pairing.offerExpiresAt + TAILCAT_UNCONSUMED_GRACE_MS : this.now(), this.now());
+    });
+  }
+  updateTailcatStatus(address: string | null, running: boolean): void {
+    this.db.prepare("INSERT INTO tailcat_state (id,address,running,updated_at) VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET address=COALESCE(excluded.address,address),running=excluded.running,updated_at=excluded.updated_at").run(address, running ? 1 : 0, this.now());
+  }
+  /** Helper paired event; idempotent with the provisional row persistTailcat created. */
+  recordTailcatPaired(client: string, pairing: { pairingHash: string; offerExpiresAt: number } | undefined): void {
+    if (!TAILCAT_CLIENT.test(client)) throw new HostError('invalid_request');
+    this.db.prepare('INSERT INTO tailcat_clients (public_key,pairing_hash,device_id,expires_at,created_at) VALUES (?,?,NULL,?,?) ON CONFLICT(public_key) DO UPDATE SET pairing_hash=COALESCE(pairing_hash,excluded.pairing_hash) WHERE device_id IS NULL')
+      .run(client, pairing?.pairingHash ?? null, pairing ? pairing.offerExpiresAt + TAILCAT_UNCONSUMED_GRACE_MS : this.now(), this.now());
+  }
+  /** Sweep, then the keys that may reach the companion: unexpired unconsumed offers and valid linked devices. */
+  tailcatAllowedClients(): string[] {
+    return this.transaction(() => {
+      this.db.prepare('DELETE FROM tailcat_clients WHERE device_id IS NULL AND expires_at<=?').run(this.now());
+      this.db.prepare('DELETE FROM tailcat_clients WHERE device_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM devices WHERE devices.id=tailcat_clients.device_id AND devices.revoked_at IS NULL AND (devices.expires_at IS NULL OR devices.expires_at>?))').run(this.now());
+      return this.db.prepare('SELECT public_key FROM tailcat_clients ORDER BY public_key LIMIT 64').all().map(row => String(row.public_key));
+    });
+  }
+  tailcatClientCounts(): { linked: number; pending: number } {
+    const row = this.db.prepare('SELECT count(device_id) AS linked, count(*)-count(device_id) AS pending FROM tailcat_clients').get();
+    return { linked: Number(row?.linked ?? 0), pending: Number(row?.pending ?? 0) };
+  }
+  requestTailcatPairing(pairingHash: string, offerExpiresAt: number, template?: string): string {
+    if (!/^[a-f0-9]{64}$/.test(pairingHash) || !Number.isSafeInteger(offerExpiresAt)) throw new HostError('invalid_request');
+    const id = randomUUID();
+    this.transaction(() => {
+      if (Number(this.db.prepare("SELECT count(*) AS n FROM tailcat_pairing_requests WHERE status='requested'").get()?.n) >= 8) throw new HostError('rate_limited');
+      this.db.prepare("INSERT INTO tailcat_pairing_requests (id,pairing_hash,offer_expires_at,status,template,created_at) VALUES (?,?,?,'requested',?,?)").run(id, pairingHash, offerExpiresAt, template ?? null, this.now());
+    });
+    return id;
+  }
+  /** Plugin side: retire stale rows (secrets included) and return the newest live request. */
+  nextTailcatPairingRequest(maxAgeMs = 30_000): TailcatPairingRequest | undefined {
+    return this.transaction(() => {
+      this.db.prepare("DELETE FROM tailcat_pairing_requests WHERE (status='open' AND expires_at<=?) OR created_at<=?").run(this.now(), this.now() - 5 * 60_000);
+      this.db.prepare("UPDATE tailcat_pairing_requests SET status='failed' WHERE status='requested' AND created_at<=?").run(this.now() - maxAgeMs);
+      const row = this.db.prepare("SELECT * FROM tailcat_pairing_requests WHERE status='requested' ORDER BY created_at DESC, rowid DESC LIMIT 1").get();
+      return row ? this.pairingRequest(row) : undefined;
+    });
+  }
+  openTailcatPairing(id: string, address: string, clientKey: string, proof: string, expiresAt: number): boolean {
+    return this.db.prepare("UPDATE tailcat_pairing_requests SET status='open',address=?,client_key=?,proof=?,expires_at=? WHERE id=? AND status='requested'").run(address, clientKey, proof, expiresAt, id).changes === 1;
+  }
+  failTailcatPairing(id: string): void {
+    this.db.prepare("UPDATE tailcat_pairing_requests SET status='failed',client_key=NULL,proof=NULL WHERE id=? AND status!='failed'").run(id);
+  }
+  tailcatPairingRequest(id: string): TailcatPairingRequest | undefined {
+    const row = this.db.prepare('SELECT * FROM tailcat_pairing_requests WHERE id=?').get(id);
+    return row ? this.pairingRequest(row) : undefined;
+  }
+  /** CLI side: secrets leave the database once the invitation was rendered (or failed). */
+  forgetTailcatPairing(id: string): void { this.db.prepare('DELETE FROM tailcat_pairing_requests WHERE id=?').run(id); }
+  private pairingRequest(row: Row): TailcatPairingRequest {
+    return { id: String(row.id), pairingHash: String(row.pairing_hash), offerExpiresAt: Number(row.offer_expires_at), status: row.status as TailcatPairingRequest['status'], createdAt: Number(row.created_at),
+      ...(row.address !== null ? { address: String(row.address) } : {}), ...(row.client_key !== null ? { clientKey: String(row.client_key) } : {}),
+      ...(row.proof !== null ? { proof: String(row.proof) } : {}), ...(row.expires_at !== null ? { expiresAt: Number(row.expires_at) } : {}),
+      ...(row.template !== null ? { template: String(row.template) } : {}) };
   }
 
   createRemotePairing(grants: DeviceGrants, routeId: string, ttlMs = 900_000): RemotePairingOffer {
@@ -188,10 +287,10 @@ export class HostState {
       this.pruneRelayRecords();
       const row = this.db.prepare('SELECT pairings.grants FROM pairings JOIN relay_grants ON pairing_hash=pairings.token_hash WHERE pairings.token_hash=? AND consumed_at IS NULL AND pairings.expires_at>? AND route_id=? AND relay_grants.revoked_at IS NULL AND published=1').get(hashSecret(pairingToken), this.now(), routeId);
       if (!row) throw new HostError('unauthorized');
-      const devices = this.db.prepare('SELECT count(*) AS n FROM relay_grants JOIN devices ON devices.id=device_id WHERE route_id=? AND relay_grants.revoked_at IS NULL AND devices.revoked_at IS NULL AND expires_at>?').get(routeId, this.now());
+      const devices = this.db.prepare('SELECT count(*) AS n FROM relay_grants JOIN devices ON devices.id=device_id WHERE route_id=? AND relay_grants.revoked_at IS NULL AND devices.revoked_at IS NULL AND relay_grants.expires_at>?').get(routeId, this.now());
       if (Number(devices?.n) >= 16 || this.liveRelayGrantCount(routeId) >= 64) throw new HostError('rate_limited');
       const deviceId = randomUUID(), deviceToken = randomBytes(32).toString('base64url'), accessId = randomUUID(), accessToken = randomBytes(32).toString('base64url');
-      const expiresAt = this.now() + 365 * 24 * 60 * 60 * 1000;
+      const expiresAt = this.now() + DEVICE_LIFETIME_MS;
       this.db.prepare('UPDATE pairings SET consumed_at=? WHERE token_hash=?').run(this.now(), hashSecret(pairingToken));
       this.db.prepare('INSERT INTO devices (id,name,token_hash,grants,created_at,publication_pending) VALUES (?,?,?,?,?,1)').run(deviceId, deviceName.trim(), hashSecret(deviceToken), String(row.grants), this.now());
       this.db.prepare('INSERT INTO relay_grants (access_id,route_id,token_hash,device_id,expires_at,max_streams,pending_since) VALUES (?,?,?,?,?,8,?)').run(accessId, routeId, hashSecret(accessToken), deviceId, expiresAt, this.now());
@@ -209,7 +308,7 @@ export class HostState {
   }
   relayGrantSnapshot(routeId: string): RelayGrant[] {
     this.transaction(() => this.pruneRelayRecords());
-    return this.db.prepare('SELECT relay_grants.* FROM relay_grants LEFT JOIN devices ON devices.id=device_id WHERE route_id=? AND relay_grants.revoked_at IS NULL AND expires_at>? AND (device_id IS NULL OR devices.revoked_at IS NULL) ORDER BY access_id LIMIT 65').all(routeId, this.now()).map(row => ({ accessId: String(row.access_id), tokenHash: String(row.token_hash), deviceId: row.device_id === null ? null : String(row.device_id), expiresAt: Number(row.expires_at), maxStreams: Number(row.max_streams) as 2 | 8 }));
+    return this.db.prepare('SELECT relay_grants.* FROM relay_grants LEFT JOIN devices ON devices.id=device_id WHERE route_id=? AND relay_grants.revoked_at IS NULL AND relay_grants.expires_at>? AND (device_id IS NULL OR devices.revoked_at IS NULL) ORDER BY access_id LIMIT 65').all(routeId, this.now()).map(row => ({ accessId: String(row.access_id), tokenHash: String(row.token_hash), deviceId: row.device_id === null ? null : String(row.device_id), expiresAt: Number(row.expires_at), maxStreams: Number(row.max_streams) as 2 | 8 }));
   }
   relayPublication(accessId: string): RelayPublication | undefined {
     const row = this.db.prepare('SELECT * FROM relay_grants WHERE access_id=?').get(accessId);
@@ -257,11 +356,11 @@ export class HostState {
 
   authenticate(deviceToken: string): AuthorizedDevice | undefined {
     if (typeof deviceToken !== 'string' || !TOKEN.test(deviceToken)) return undefined;
-    const row = this.db.prepare('SELECT * FROM devices WHERE token_hash=? AND revoked_at IS NULL AND publication_pending=0 AND NOT EXISTS (SELECT 1 FROM relay_grants WHERE device_id=devices.id AND (revoked_at IS NOT NULL OR expires_at<=?))').get(hashSecret(deviceToken), this.now());
+    const row = this.db.prepare('SELECT * FROM devices WHERE token_hash=? AND devices.revoked_at IS NULL AND (devices.expires_at IS NULL OR devices.expires_at>?) AND publication_pending=0 AND NOT EXISTS (SELECT 1 FROM relay_grants WHERE device_id=devices.id AND (relay_grants.revoked_at IS NOT NULL OR relay_grants.expires_at<=?))').get(hashSecret(deviceToken), this.now(), this.now());
     return row ? this.device(row) : undefined;
   }
   getDevice(deviceId: string): AuthorizedDevice | undefined {
-    const row = this.db.prepare('SELECT * FROM devices WHERE id=? AND revoked_at IS NULL AND publication_pending=0 AND NOT EXISTS (SELECT 1 FROM relay_grants WHERE device_id=devices.id AND (revoked_at IS NOT NULL OR expires_at<=?))').get(deviceId, this.now());
+    const row = this.db.prepare('SELECT * FROM devices WHERE id=? AND devices.revoked_at IS NULL AND (devices.expires_at IS NULL OR devices.expires_at>?) AND publication_pending=0 AND NOT EXISTS (SELECT 1 FROM relay_grants WHERE device_id=devices.id AND (relay_grants.revoked_at IS NOT NULL OR relay_grants.expires_at<=?))').get(deviceId, this.now(), this.now());
     return row ? this.device(row) : undefined;
   }
   private device(row: Row): AuthorizedDevice {

@@ -1,0 +1,5 @@
+"done" = "Listo";
+"scan_title" = "Escanea el código de vinculación";
+"notify_answer" = "Respuesta lista";
+"notify_failed" = "Se detuvo por un error";
+"notify_decision" = "El agente necesita tu decisión";

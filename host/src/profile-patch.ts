@@ -2,8 +2,7 @@
 import { load, JSON_SCHEMA, Type } from 'js-yaml';
 // DSH entry-list dialect permits !!js scalar expressions. Parse inertly: never eval them.
 const patchSchema = JSON_SCHEMA.extend(new Type('tag:yaml.org,2002:js', { kind: 'scalar', construct: (source: string) => ({ inertDshExpression: source }) }));
-import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { isEntryPoint } from './entry-point.ts';
 
 /** Installer seam: validate additive YAML without interpreting code tags or executing DSH. */
 export function validateProfilePatch(text: string, options: { rejectCompanion?: boolean } = {}): void {
@@ -31,7 +30,7 @@ export function decodeProfileTransport(input: string): string {
   if (bytes.length > 1048576 || bytes.toString('base64') !== encoded) throw new Error('Invalid profile transport');
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); // Preserve source BOM.
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (isEntryPoint(import.meta.url)) {
   try {
     const args = process.argv.slice(2), base64 = args.includes('--base64'), rejectCompanion = args.includes('--reject-companion');
     if (new Set(args).size !== args.length || args.some(arg => !['--base64', '--reject-companion'].includes(arg))) throw new Error();

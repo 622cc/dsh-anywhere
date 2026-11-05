@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-host",
-  "version": "0.7.2",
+  "version": "0.7.14",
   "description": "Native mobile companion host plugin for an existing DeepSeek Harness runtime",
   "private": true,
   "type": "module",
@@ -43,6 +43,9 @@
     "./types": {
       "types": "./dist/types.d.ts",
       "default": "./dist/types.js"
+    },
+    "./client": {
+      "default": "./dist/client.js"
     }
   },
   "bin": {
@@ -68,5 +71,11 @@
   },
   "dependencies": {
     "ws": "8.22.0"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
   }
 }

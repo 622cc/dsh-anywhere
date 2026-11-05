@@ -1,0 +1,89 @@
+{
+  "name": "Relinked",
+  "capabilities": {
+    "network": {
+      "hosts": [
+        "*"
+      ]
+    },
+    "clipboard": true,
+    "statusBar": true,
+    "host": [
+      "ui.open",
+      "link.state",
+      "link.pair",
+      "link.scan",
+      "link.forget",
+      "link.reset",
+      "link.path",
+      "link.diagnose",
+      "files.pick",
+      "haptic",
+      "network.state",
+      "app.state",
+      "notify.*"
+    ],
+    "picker": true,
+    "webview": {
+      "hosts": []
+    }
+  },
+  "build": 1,
+  "appearance": "system",
+  "theme": {
+    "cssVars": {
+      "theme": {
+        "font-sans": "Geist, sans-serif",
+        "font-mono": "Geist Mono, monospace",
+        "radius": "12px"
+      },
+      "light": {
+        "background": "#F7F7F4",
+        "foreground": "#26251E",
+        "card": "#FCFCFA",
+        "card-foreground": "#26251E",
+        "popover": "#FCFCFA",
+        "popover-foreground": "#26251E",
+        "primary": "#26251E",
+        "primary-foreground": "#F7F7F4",
+        "secondary": "#EFEEEA",
+        "secondary-foreground": "#26251E",
+        "muted": "#F2F1ED",
+        "muted-foreground": "#6C6B65",
+        "accent": "#EFEEEA",
+        "accent-foreground": "#26251E",
+        "destructive": "#CF2D56",
+        "border": "#E5E4DF",
+        "input": "#DCDBD6",
+        "ring": "#26251E",
+        "link": "#F54E00",
+        "live": "#26251E"
+      },
+      "dark": {
+        "background": "#14120B",
+        "foreground": "#EDECEC",
+        "card": "#1C1A14",
+        "card-foreground": "#EDECEC",
+        "popover": "#1C1A14",
+        "popover-foreground": "#EDECEC",
+        "primary": "#EDECEC",
+        "primary-foreground": "#14120B",
+        "secondary": "#27251F",
+        "secondary-foreground": "#EDECEC",
+        "muted": "#1C1A14",
+        "muted-foreground": "#8E8D88",
+        "accent": "#27251F",
+        "accent-foreground": "#EDECEC",
+        "destructive": "#CF2D56",
+        "border": "#2B2923",
+        "input": "#36342E",
+        "ring": "#EDECEC",
+        "link": "#F54E00",
+        "live": "#EDECEC"
+      }
+    }
+  },
+  "statusBar": {
+    "foreground": "auto"
+  }
+}

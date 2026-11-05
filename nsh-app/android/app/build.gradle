@@ -1,0 +1,33 @@
+// The NSH app (../nsh.json) in one full-screen NshView, without push or modules.
+plugins { id 'com.android.application' }
+def app = new groovy.json.JsonSlurper().parse(rootProject.file('../nsh.json'))
+android {
+    namespace 'dev.dshmobile.nsh'
+    compileSdk 36
+    defaultConfig {
+        applicationId app.id
+        minSdk 28
+        targetSdk 36
+        versionCode app.build as int
+        versionName app.version
+        manifestPlaceholders = [appName: app.name]
+        ndk { abiFilters 'arm64-v8a' } // phones and Apple-silicon emulators; the other ABIs only add size
+    }
+    // The release key never enters the repo: DSH_ANDROID_KEYSTORE names a PKCS12 file whose store and key share the
+    // password in DSH_ANDROID_KEYSTORE_PASSWORD. Without it the debug key signs, for builds that stay on this machine.
+    def keystore = System.getenv('DSH_ANDROID_KEYSTORE'), password = System.getenv('DSH_ANDROID_KEYSTORE_PASSWORD')
+    if (keystore && !password) throw new GradleException('DSH_ANDROID_KEYSTORE is set without DSH_ANDROID_KEYSTORE_PASSWORD.')
+    signingConfigs {
+        if (keystore) release { storeFile file(keystore); storeType 'PKCS12'; storePassword password; keyAlias 'release'; keyPassword password }
+    }
+    buildTypes { release { minifyEnabled false; signingConfig keystore ? signingConfigs.release : signingConfigs.debug } }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    packaging { jniLibs { useLegacyPackaging false } }
+}
+dependencies {
+    implementation files('libs/nsh.aar')
+    implementation files('libs/dshtailcat.aar') // Tailcat client, built by tools/build-tailcat.sh
+    implementation 'com.google.android.gms:play-services-code-scanner:16.1.0' // QR scanning without a camera permission
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303' // the real org.json for JVM tests (android.jar has stubs)
+}

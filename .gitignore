@@ -45,3 +45,19 @@ Thumbs.db
 
 # Immutable versioned host builds mounted by the live DSH profile
 host/releases/
+
+# Tailcat native outputs (tools/build-tailcat.sh)
+android/app/libs/*.aar
+android/app/libs/*-sources.jar
+
+# iOS shell: generated project, frameworks built by build.sh / tools/build-tailcat.sh, SwiftPM state
+nsh-app/ios/DSH.xcodeproj/
+nsh-app/ios/DSH/Info.plist
+nsh-app/ios/Frameworks/
+nsh-app/ios/DSHKit/.build/
+nsh-app/ios/DSHKit/.swiftpm/
+
+private/
+
+# Test keys, made by make-fixtures.ts
+nsh-app/android/app/src/test/resources/pairing.json

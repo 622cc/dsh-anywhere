@@ -6,17 +6,44 @@ import { createDshAdapter } from './dsh-adapter.ts';
 import type { DshAgentPresets, DshEvents, DshSessionController } from './dsh-adapter.ts';
 import { HostError } from './errors.ts';
 import { loadConfiguration } from './config.ts';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { startHostServer } from './server.ts';
+import { createMobileAdminRoutes } from './admin.ts';
+import type { MobileAdminRoute } from './admin.ts';
 import type { HostConfiguration } from './types.ts';
 import { createWorkspaceSource } from './workspace-source.ts';
 import type { DshWorkspaceRegistry } from './workspace-source.ts';
 import { runningSubagentCounts } from './running-subagents.ts';
 import type { LiveAgent, LiveSession } from './running-subagents.ts';
+import { createDshRelay } from './dsh-relay.ts';
+import type { DshRelay } from './dsh-relay.ts';
+import { createUiModules, uiTool } from './ui-modules.ts';
+import { lifecycleLog } from './lifecycle-log.ts';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isCompatibleDshVersion } from './compatibility.ts';
+import { setupTailcat } from './setup-tailcat.ts';
+import { defaultConfigPath, legacyCompanionActive, runningDshVersion } from './zero-config.ts';
+import type { ProfileFacts } from './zero-config.ts';
 
 /** Configuration is deliberately explicit and owner-local, never supplied by a mobile client. */
-export type Config = (HostConfiguration & { dshVersion: string; configPath?: never }) | { dshVersion: string; configPath: string };
+/** `generativeUi`: give every DSH agent the show_interface tool (ui-modules.ts); off unless the profile block sets it.
+ * `nsh`: the NSH that builds those interfaces, the one the phone app runs (their APIs differ between versions). */
+export type Config = ((HostConfiguration & { dshVersion: string; configPath?: never }) | { dshVersion: string; configPath: string }) & { generativeUi?: boolean; nsh?: string };
+/** The bundle row (tools/pack-bundle.mjs): no configPath and no dshVersion. The companion uses the private path
+ * install-host uses, creates the Tailcat configuration there on first start, and runs as the running DSH's version. */
+export type BundleConfig = { generativeUi?: boolean; nsh?: string };
+function isBundleRow(config: unknown): config is BundleConfig | undefined | null {
+  return config === undefined || config === null || (typeof config === 'object' && !Array.isArray(config) && Object.keys(config).every(key => key === 'generativeUi' || key === 'nsh'));
+}
 /** Structural Cordis context avoids importing or vendoring DSH's service graph. */
+export interface HostConnection {
+  readonly fetch?: { register(route: MobileAdminRoute): () => Promise<void> };
+  /** DSH's own sign-in URL for a local client, as the Desktop host builds it (dsh-desktop-host). */
+  authenticatedUrl?(baseUrl: string): string;
+}
+/** DSH's web server: protocol and the OS-assigned port, read at use time (they change per launch). */
+export interface HostWebServer { readonly protocol: string; readonly port: number | undefined }
 export interface CompanionContext {
   sessionController: DshSessionController;
   agentPresets?: DshAgentPresets;
@@ -30,8 +57,10 @@ export interface CompanionContext {
   /** Public rc.2 header-only persistence observation; no event-log decoding. */
   sessionPersistence?: { stat(id: string, options?: { signal?: AbortSignal }): Promise<{ readonly header: unknown } | undefined> };
   /** Cordis 4.0.4 active lookup bypasses inject and returns fresh tracing proxies. */
-  get?<K extends 'workspaceRegistry' | 'sessions' | 'agents' | 'sessionPersistence' | 'fileUploads' | 'attachments' | 'userQuestions' | 'llm'>(name: K): ({ workspaceRegistry: DshWorkspaceRegistry; sessions: NonNullable<CompanionContext['sessions']>; agents: NonNullable<CompanionContext['agents']>; sessionPersistence: NonNullable<CompanionContext['sessionPersistence']>; fileUploads: NonNullable<CompanionContext['fileUploads']>; attachments: NonNullable<CompanionContext['attachments']>; userQuestions: QuestionServices; llm: NonNullable<CompanionContext['llm']> })[K] | undefined;
+  get?<K extends 'workspaceRegistry' | 'sessions' | 'agents' | 'sessionPersistence' | 'fileUploads' | 'attachments' | 'userQuestions' | 'llm' | 'profileContext'>(name: K): ({ workspaceRegistry: DshWorkspaceRegistry; sessions: NonNullable<CompanionContext['sessions']>; agents: NonNullable<CompanionContext['agents']>; sessionPersistence: NonNullable<CompanionContext['sessionPersistence']>; fileUploads: NonNullable<CompanionContext['fileUploads']>; attachments: NonNullable<CompanionContext['attachments']>; userQuestions: QuestionServices; llm: NonNullable<CompanionContext['llm']>; profileContext: ProfileFacts })[K] | undefined;
   on(name: string, listener: (...args: any[]) => any, options?: { global: boolean; prepend?: boolean }): () => unknown;
+  /** Optional dynamic injection: the admin UI exists only when a Host Connection provides /api. */
+  inject?(names: string[], callback: (ctx: CompanionContext & { connection?: HostConnection; webServer?: HostWebServer; tools?: { register(tool: unknown): () => unknown } }) => (() => unknown) | undefined): unknown;
 }
 export const name = 'dsh-mobile-companion';
 export const version = HOST_VERSION;
@@ -75,13 +104,28 @@ function eventBridge(ctx: CompanionContext): DshEvents {
 
 /** Promise<disposer> is the inspected Cordis startup effect shape: load awaits
  * startup; unload awaits the eventual disposer even if removal races startup. */
-export async function apply(ctx: CompanionContext, config: Config): Promise<() => Promise<void>> {
+export async function apply(ctx: CompanionContext, input: Config | BundleConfig | undefined): Promise<() => Promise<void>> {
+  const bundled = isBundleRow(input);
+  // dshVersion is filled in below, once the running DSH's version is known.
+  const config: Config = bundled ? { ...(input ?? {}), configPath: defaultConfigPath(), dshVersion: '' } : input as Config;
   let adapter: Awaited<ReturnType<typeof createDshAdapter>> | undefined;
   let questions: ReturnType<typeof createQuestionBridge> | undefined;
+  const logDir = 'configPath' in config && typeof config.configPath === 'string' && isAbsolute(config.configPath) ? dirname(config.configPath) : undefined;
+  const log = logDir ? lifecycleLog(logDir) : () => {};
+  log('starting', HOST_VERSION);
   try {
+    if (bundled) {
+      const profile = ctx.get?.('profileContext');
+      if (legacyCompanionActive(profile)) throw new HostError('companion_conflict');
+      const version = runningDshVersion(profile);
+      if (version === undefined || !isCompatibleDshVersion(version)) throw new HostError('unsupported_dsh_version');
+      config.dshVersion = version;
+      // Created once, like install-host's first run; an existing configuration is only loaded, never regenerated.
+      if (!existsSync(config.configPath!)) await setupTailcat({ configPath: config.configPath!, dshVersion: version });
+    }
     let hostConfig: HostConfiguration;
     if ('configPath' in config && config.configPath !== undefined) {
-      if (!isAbsolute(config.configPath) || Object.keys(config).some(key => key !== 'configPath' && key !== 'dshVersion')) throw new HostError('invalid_config');
+      if (!isAbsolute(config.configPath) || Object.keys(config).some(key => key !== 'configPath' && key !== 'dshVersion' && key !== 'generativeUi' && key !== 'nsh') || ('generativeUi' in config && typeof config.generativeUi !== 'boolean') || ('nsh' in config && (typeof config.nsh !== 'string' || !isAbsolute(config.nsh)))) throw new HostError('invalid_config');
       hostConfig = await loadConfiguration(config.configPath);
     } else hostConfig = config as HostConfiguration;
     const workspaceSource = await createWorkspaceSource(hostConfig, () => ctx.get?.('workspaceRegistry'));
@@ -127,14 +171,48 @@ export async function apply(ctx: CompanionContext, config: Config): Promise<() =
         if (!store || !registry) throw new HostError('unavailable');
         return runningSubagentCounts(registry.list(), store.list());
       } } : {}) });
-    const host = await startHostServer({ config: hostConfig, adapter, workspaceSource });
+    const configPath = 'configPath' in config && typeof config.configPath === 'string' ? config.configPath : undefined;
+    // A configured NSH is required, not preferred: building with another version gives the phone modules it cannot run.
+    const nsh = config.nsh !== undefined ? (existsSync(config.nsh) ? config.nsh : undefined)
+      : [process.env.NSH_BIN, join(homedir(), '.local/bin/nsh'), join(homedir(), '.nsh/bin/nsh'), '/opt/homebrew/bin/nsh', '/usr/local/bin/nsh'].find(path => path && existsSync(path));
+    const ui = config.generativeUi && configPath && nsh ? createUiModules({ dir: join(dirname(configPath), 'ui'), nsh }) : undefined;
+    // DSH's own protocol for the owner's phone, under /dsh on this server once DSH's web server is known (below).
+    let dshRelay: DshRelay | undefined;
+    const host = await startHostServer({ config: hostConfig, adapter, workspaceSource, dsh: () => dshRelay });
+    if (configPath) ctx.inject?.(['connection'], connCtx => {
+      const connection = connCtx.connection;
+      if (!connection?.fetch?.register) return undefined;
+      const record = hostConfig as unknown as Record<string, unknown>;
+      const transport = record.tailcat ? 'tailcat' as const : 'direct' as const;
+      const publicUrl = typeof record.publicUrl === 'string' ? record.publicUrl : undefined;
+      const disposers = createMobileAdminRoutes({ configPath, dshVersion: config.dshVersion, transport, ...(publicUrl === undefined ? {} : { publicUrl }) }).map(route => connection.fetch!.register(route));
+      return () => Promise.all(disposers.map(dispose => dispose()));
+    });
+    if (ui) ctx.inject?.(['tools'], toolsCtx => toolsCtx.tools?.register(uiTool(ui)));
+    // DSH's own protocol for the owner's phone: the relay signs in exactly as the Desktop host does.
+    ctx.inject?.(['connection', 'webServer'], webCtx => {
+      const connection = webCtx.connection, web = webCtx.webServer;
+      if (!connection?.authenticatedUrl || !web) return undefined;
+      const origin = () => `${web.protocol}//127.0.0.1:${String(web.port)}`;
+      const relay = createDshRelay({ upstream: () => ({ origin: origin(), loginUrl: connection.authenticatedUrl!(origin()) }), ...(ui ? { ui } : {}) });
+      dshRelay = relay;
+      return async () => { dshRelay = undefined; await relay.close(); };
+    });
     let closed = false;
+    log('running', HOST_VERSION);
     return async () => {
       if (closed) return; closed = true;
+      log('stopping', HOST_VERSION);
       questions?.close(); adapter!.dispose();
-      try { await host.close(); } catch { throw new HostError('unavailable'); }
+      try { await host.close(); } catch { log('failed', HOST_VERSION, 'close'); throw new HostError('unavailable'); }
+      log('stopped', HOST_VERSION);
     };
-  } catch (error) { questions?.close(); adapter?.dispose(); throw error instanceof HostError ? error : new HostError('invalid_config'); }
+  } catch (error) {
+    questions?.close(); adapter?.dispose();
+    const failure = error instanceof HostError ? error : new HostError('invalid_config');
+    log('failed', HOST_VERSION, failure.code);
+    throw failure;
+  }
 }
 
 export default { name, inject, apply };

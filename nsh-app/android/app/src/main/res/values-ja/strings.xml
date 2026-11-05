@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="done">完了</string>
+    <string name="app_label">DSH</string>
+    <string name="channel_answers">回答の完了</string>
+    <string name="channel_decisions">エージェントからの確認</string>
+    <string name="channel_watching">バックグラウンドで監視を続ける</string>
+    <string name="notify_answer">回答ができました</string>
+    <string name="notify_failed">エラーで停止しました</string>
+    <string name="notify_decision">エージェントが判断を求めています</string>
+    <string name="watching">DSH がチャットを監視しています</string>
+    <string name="watching_stop">停止</string>
+</resources>

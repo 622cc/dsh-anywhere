@@ -78,7 +78,9 @@ test('new contiguous control events reuse immutable ancestry without new backwar
   await h.adapter.snapshot('synthetic-session', new AbortController().signal);
   records.push({ type: 'event', event: { seq: fixture.cursor + 1, time: 1700000003893, type: 'tool/call', data: { turn: 900, callId: 'new-call', name: 'read' } } });
   const updated = await h.adapter.snapshot('synthetic-session', new AbortController().signal);
-  assert.equal(updated.cursor, fixture.cursor + 1); assert.equal(updated.messages.length, 100);
+  assert.equal(updated.cursor, fixture.cursor + 1);
+  assert.equal(updated.messages.filter(m => m.kind !== 'step' && m.kind !== 'thought').length, 100);
+  assert.equal(updated.messages.at(-1)?.id, 'step:new-call', 'the new call is a visible step and does not displace a message');
   assert.equal(h.reads.length, 8);
 });
 
@@ -254,7 +256,10 @@ test('late settlement of an abandoned page cannot replace or delete a fresh same
   try {
     await newReading; settleOld(); await new Promise<void>(resolve => setImmediate(resolve));
     const other = h.adapter.snapshot('synthetic-session', AbortSignal.timeout(2000));
-    await new Promise<void>(resolve => setImmediate(resolve)); releaseNew();
+    // Release only once the second reader's own opening observation has closed (abandoned, wanted, other),
+    // so it joins the held flight; a fixed tick let it overlap the shared pagination on a loaded runner.
+    while (h.cleanup().closed < 3) await new Promise<void>(resolve => setImmediate(resolve));
+    releaseNew();
     const snapshots = await Promise.all([wanted, other]);
     assert.ok(snapshots.every(snapshot => snapshot.messages.length === 64));
     assert.equal(h.reads.length, 4, 'only the abandoned first page plus one shared three-page recovery');

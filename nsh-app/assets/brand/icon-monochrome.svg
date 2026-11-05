@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- The mark in white on transparent, for iOS's tinted icon (the system tints it by brightness). Same geometry as icon.svg. -->
+  <path transform="scale(2)" fill-rule="evenodd" fill="#FFFFFF"
+    d="M136 216c0-53 43-96 96-96h48c53 0 96 43 96 96v12c0 53-43 96-96 96H236l-62 54c-7 6-18 1-18-8v-46h-20c-27 0-48-22-48-48V216zM230 222a26 26 0 1 0 52 0a26 26 0 1 0-52 0z"/>
+</svg>

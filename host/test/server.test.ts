@@ -11,6 +11,7 @@ import type { TestContext } from 'node:test';
 import { startHostServer } from '../src/server.ts';
 import { HostState } from '../src/state.ts';
 import { createDshAdapter } from '../src/dsh-adapter.ts';
+import { generateServerIdentity } from '../src/x509.ts';
 import { createWorkspaceSource } from '../src/workspace-source.ts';
 import { opening } from './fixtures/rc2.ts';
 import { HostError } from '../src/errors.ts';
@@ -59,6 +60,107 @@ async function setup(t: TestContext, adapter: HostAdapter = new TestAdapter()) {
   }
   return { host, hosts, config, adapter, baseUrl, request, pair };
 }
+
+/** Opens a session event stream on a raw (optionally TLS) socket; resolves after the first snapshot. */
+async function rawStream(port: number, token: string, tls?: { name: string; ca: string }) {
+  const net = await import('node:net'), tlsModule = await import('node:tls');
+  const socket = tls ? tlsModule.connect({ host: '127.0.0.1', port, servername: tls.name, ca: tls.ca }) : net.connect(port, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => { socket.once(tls ? 'secureConnect' : 'connect', resolve); socket.once('error', reject); });
+  socket.write(`GET /v1/sessions/s-alpha/events HTTP/1.1\r\nHost: ${tls?.name ?? '127.0.0.1'}\r\nAuthorization: Bearer ${token}\r\nAccept: text/event-stream\r\n\r\n`);
+  let text = '';
+  await new Promise<void>((resolve, reject) => {
+    socket.on('data', chunk => { text += chunk; if (text.includes('event: snapshot') || /^HTTP\/1\.1 [45]/.test(text)) resolve(); });
+    socket.once('error', reject); socket.once('end', () => resolve());
+  });
+  return { socket, status: Number(/^HTTP\/1\.1 (\d+)/.exec(text)?.[1]) };
+}
+
+for (const transport of ['http', 'tls'] as const) for (const how of ['half-close (what a Tailcat forward sends)', 'full close'] as const)
+  test(`a phone that leaves a chat frees its stream slot at once: ${transport}, ${how}`, async t => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mobile-slots-')));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(join(dir, 'alpha'));
+    const name = 'h-0123456789abcdef0123456789abcdef.dsh.invalid', identity = generateServerIdentity(name);
+    writeFileSync(join(dir, 'cert.pem'), identity.certPem); writeFileSync(join(dir, 'key.pem'), identity.keyPem, { mode: 0o600 });
+    const config: HostConfiguration = { hostName: 'Test fixture only', bind: '127.0.0.1', port: 0, statePath: join(dir, 'host.sqlite'), allowInsecureLoopback: true,
+      workspaces: [{ id: 'alpha', name: 'alpha', path: join(dir, 'alpha') }], ...(transport === 'tls' ? { tls: { certPath: join(dir, 'cert.pem'), keyPath: join(dir, 'key.pem') } } : {}) };
+    const host = await startHostServer({ config, adapter: new TestAdapter() });
+    t.after(() => host.close());
+    const port = Number(new URL((await host.start()).baseUrl).port);
+    const offer = host.state.createPairing({ readWorkspaceIds: ['alpha'], executeWorkspaceIds: [] });
+    const { deviceToken } = host.state.consumePairing(offer.pairingToken, 'Fixture phone');
+    const tls = transport === 'tls' ? { name, ca: identity.certPem } : undefined;
+    for (let round = 0; round < 3; round++) {
+      const { socket, status } = await rawStream(port, deviceToken, tls);
+      assert.equal(status, 200, `chat ${round + 1}`);
+      socket.on('error', () => {});
+      if (how === 'full close') socket.destroy(); else socket.end();
+    }
+    // Three chats were opened and left. Opening three more must not hit the per-device cap.
+    const open = [];
+    try {
+      for (let n = 0; n < 3; n++) {
+        const stream = await rawStream(port, deviceToken, tls); open.push(stream.socket);
+        assert.equal(stream.status, 200, `stream ${n + 1} after leaving three chats`);
+      }
+    } finally { for (const socket of open) socket.destroy(); }
+  });
+
+// A phone shows one chat at a time. Over Tailcat its previous stream can still hold a slot when it
+// reopens (chat switch, refresh). The newest stream must win; refusing it left phones in "Syncing".
+test('a phone at its chat-stream limit gets the new stream and its oldest chat stream is closed', async t => {
+  const { request, pair } = await setup(t); const { deviceToken } = await pair();
+  const settings = { expectedRevision: 0, enabled: true, projects: [], chats: [] };
+  assert.equal((await request('/notification-settings', deviceToken, 'PUT', settings)).status, 200);
+  const page = await (await request('/notification-events', deviceToken)).json();
+  const notifications = await request('/notification-events/stream?after=' + page.nextCursor, deviceToken);
+  assert.equal(notifications.status, 200);
+  const notificationReader = notifications.body!.getReader();
+  await notificationReader.read();
+  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  try {
+    for (let n = 0; n < 4; n++) {
+      const sse = await request('/sessions/s-alpha/events', deviceToken);
+      assert.equal(sse.status, 200, `chat stream ${n + 1} with the notification stream open`);
+      const reader = sse.body!.getReader(); readers.push(reader);
+      assert.match(new TextDecoder().decode((await reader.read()).value), /event: snapshot/);
+    }
+    // The oldest chat streams were closed to make room; the newest and the notification stream stay.
+    assert.equal((await readers[0]!.read()).done, true, 'oldest chat stream ended');
+    const other = await pair({ readWorkspaceIds: ['alpha'], executeWorkspaceIds: [] });
+    const foreign = await request('/sessions/s-alpha/events', other.deviceToken);
+    assert.equal(foreign.status, 200, 'another device is unaffected'); await foreign.body!.cancel();
+  } finally {
+    for (const reader of readers) await reader.cancel().catch(() => {});
+    await notificationReader.cancel();
+  }
+});
+
+test('steps and thinking reach the phone with only their allowed fields, and steps never crowd out messages', async t => {
+  const adapter = new TestAdapter();
+  const item = adapter.snapshots.get('s-alpha')!;
+  item.messages = [
+    { id: 'm-old', role: 'user', text: 'Question', createdAt: 1 },
+    { id: 'thought:a1', role: 'assistant', kind: 'thought', text: 'Plan the check.', createdAt: 2 },
+    ...Array.from({ length: 150 }, (_, n) => ({ id: `step:c${n}`, role: 'assistant' as const, kind: 'step' as const, text: `Step ${n}`, createdAt: 3 + n,
+      step: { callId: `c${n}`, tool: 'bash', kind: 'execute' as const, status: 'completed' as const, extra: 'NOT-ALLOWED' } as any })),
+    { id: 'm-answer', role: 'assistant', text: 'Answer', createdAt: 200 },
+  ];
+  const { request, pair } = await setup(t, adapter), { deviceToken } = await pair();
+  const body = await (await request('/sessions/s-alpha', deviceToken)).json();
+  assert.equal(body.messages[0].id, 'm-old', 'the question is kept although 150 steps follow it');
+  assert.equal(body.messages.at(-1).id, 'm-answer');
+  assert.equal(body.hasMore, false);
+  assert.deepEqual(body.messages[2].step, { callId: 'c0', tool: 'bash', kind: 'execute', status: 'completed' });
+  assert.equal(body.messages[1].kind, 'thought');
+  assert.equal(JSON.stringify(body).includes('NOT-ALLOWED'), false);
+  item.messages = Array.from({ length: 1200 }, (_, n) => ({ id: `step:x${n}`, role: 'assistant' as const, kind: 'step' as const, text: `Step ${n}`, createdAt: n, step: { callId: `x${n}`, tool: 'bash', kind: 'execute' as const, status: 'completed' as const } }));
+  const capped = await (await request('/sessions/s-alpha', deviceToken)).json();
+  assert.equal(capped.messages.length, 1000, 'never more items than the phone accepts');
+  assert.equal(capped.messages.at(-1).id, 'step:x1199'); assert.equal(capped.hasMore, true);
+  item.messages = [{ id: 'step:bad', role: 'assistant', kind: 'step', text: 'No step object', createdAt: 1 }];
+  assert.equal((await request('/sessions/s-alpha', deviceToken)).status, 500, 'a step without its step object is rejected');
+});
 
 test('blank sessions are hidden only in the index, mobile creates remain visible across restart', async t => {
   const adapter = new TestAdapter();
@@ -127,7 +229,8 @@ test('notification stream wakes on commit without waiting for its fallback tick'
   } finally { await reader.cancel(); }
 });
 
-test('notification heartbeat and revoke remain responsive while a page lookup is held', { timeout: 5000 }, async t => {
+// The 1.5 s heartbeat race below is the liveness bound; the test timeout only guards hangs and must cover slow Windows setup.
+test('notification heartbeat and revoke remain responsive while a page lookup is held', { timeout: 10000 }, async t => {
   const adapter = new TestAdapter(), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
   let hold = false;
   adapter.notifications = () => ({ subscribe() { return () => {}; }, list: async () => { if (hold) { entered.resolve(); await gate.promise; } return adapter.listSessions(); },
@@ -750,7 +853,12 @@ test('SSE reconnect replaces history and both local and external revocation clos
     assert.doesNotMatch(replacement, /Fixture only/);
     readers.push(resumedReader);
   }
-  assert.equal((await request('/sessions/s-alpha/events', deviceToken)).status, 429);
+  // At the per-device cap the newest chat stream wins and the device's oldest one ends.
+  const newest = await request('/sessions/s-alpha/events', deviceToken);
+  assert.equal(newest.status, 200);
+  const newestReader = newest.body!.getReader(); await newestReader.read();
+  assert.equal((await readers[0]!.read()).done, true);
+  readers.push(newestReader);
   const external = new HostState(config.statePath);
   assert.equal(external.revokeDevice(deviceId), true);
   external.close();
@@ -856,4 +964,21 @@ test('all reads require device bearer auth; one-use pairing returns individual a
   const browser = await request('/workspaces', paired.deviceToken, 'GET', undefined, { Origin: 'http://localhost' });
   assert.equal(browser.status, 403);
   assert.equal((await request('/workspaces?token=not-a-credential', paired.deviceToken)).status, 400);
+});
+
+test('failed bearer authentication is throttled per peer without locking out valid devices', async t => {
+  const { request, pair, host } = await setup(t);
+  const { deviceToken } = await pair();
+  let lookups = 0; const authenticate = host.state.authenticate.bind(host.state);
+  host.state.authenticate = (token: string) => { lookups++; return authenticate(token); };
+  for (let n = 0; n < 30; n++) assert.equal((await request('/workspaces', n % 2 ? 'A'.repeat(43) : 'malformed')).status, 401);
+  assert.equal(lookups, 15, 'malformed headers never reach SQLite');
+  const limited = await request('/workspaces', 'B'.repeat(43));
+  assert.equal(limited.status, 429); assert.equal(limited.headers.get('retry-after'), '60');
+  assert.equal((await request('/workspaces', 'malformed')).status, 429);
+  assert.equal((await request('/workspaces', deviceToken)).status, 200, 'a valid device on the throttled address still works');
+  // Pairing has its own quota and still works for a legitimate re-pair from the same peer.
+  const offer = host.state.createPairing({ readWorkspaceIds: ['alpha'], executeWorkspaceIds: [] });
+  assert.equal((await request('/pairings', undefined, 'POST', { pairingToken: offer.pairingToken, deviceName: 'Fixture phone' })).status, 201);
+  assert.equal(host.server.maxConnections, 256);
 });

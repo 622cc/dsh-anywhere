@@ -1,20 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostError } from '../src/errors.ts';
 import { HostState } from '../src/state.ts';
 import { assertPrivate } from '../src/private-files.ts';
 import { assertStagedFilePrivate } from './helpers/staged-file-acl.ts';
-import { startHostServer } from '../src/server.ts';
+import { portableUploadName, startHostServer } from '../src/server.ts';
 import { request as httpRequest } from 'node:http';
 import { UPLOAD_LIMIT } from '../src/phone.ts';
 import type { HostAdapter, HostSnapshot } from '../src/types.ts';
 
 async function setup(t: any, scopeGate?: () => Promise<void>) {
-  const root = await mkdtemp(join(tmpdir(), 'mobile-phone-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'mobile-phone-')));
   await mkdir(join(root, 'workspace'));
   const calls: unknown[] = [];
   const snapshot: HostSnapshot = { session: { id: 'chat', title: 'Synthetic', workspaceId: 'w', running: true, updatedAt: 1 }, messages: [{ id: 'm', text: 'Synthetic '.repeat(300), role: 'assistant', createdAt: 1 }], cursor: 1, hasMore: false, activity: 'running' };
@@ -273,7 +273,11 @@ test('receipt quota rejection before admission preserves upload token and permit
   const device = pair(); const pick = await fetch(baseUrl + '/v1/sessions/chat/uploads', { method: 'POST', headers: { Authorization: 'Bearer ' + device.deviceToken, 'Content-Type': 'text/plain' }, body: 'synthetic' }); const { uploadId } = await pick.json();
   const body = { requestId: randomUUID(), text: 'Synthetic', uploadIds: [uploadId] };
   assert.equal((await request('/sessions/chat/messages', device.deviceToken, body)).status, 429); assert.equal(host.state.getCommand(device.deviceId, body.requestId), undefined); assert.equal(uploads, 0);
-  blocked = false; assert.equal((await request('/sessions/chat/messages', device.deviceToken, body)).status, 200); assert.equal(uploads, 1); assert.equal(releases, 1);
+  blocked = false;
+  // The response waits only 25 ms for dispatch; on a slow runner it can still read pending (202), so follow the exact replay.
+  let retry = await request('/sessions/chat/messages', device.deviceToken, body);
+  for (let n = 0; retry.status === 202 && n < 200; n++) { await new Promise(resolve => setTimeout(resolve, 10)); retry = await request('/sessions/chat/messages', device.deviceToken, body); }
+  assert.equal(retry.status, 200); assert.equal(uploads, 1); assert.equal(releases, 1);
 });
 
 test('file pick stays private on disk until idempotent send and removal leaves no upstream receipt', async t => {
@@ -304,7 +308,10 @@ test('failed send cleans private file and exact replay never uploads upstream tw
   const pick = await fetch(baseUrl + '/v1/sessions/chat/uploads', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'text/plain' }, body: 'synthetic' }); const { uploadId } = await pick.json();
   const body = { requestId: randomUUID(), text: 'Synthetic', uploadIds: [uploadId] };
   const response = await request('/sessions/chat/messages', token, body); assert.equal(response.status, 202);
-  assert.equal((await response.json()).status, 'uncertain');
+  // The first response waits only 25 ms for dispatch; on a slow runner it can still read pending, so follow the exact replay.
+  let status = (await response.json()).status;
+  for (let n = 0; status === 'pending' && n < 200; n++) { await new Promise(resolve => setTimeout(resolve, 10)); status = (await (await request('/sessions/chat/messages', token, body)).json()).status; }
+  assert.equal(status, 'uncertain');
   assert.equal((await request('/sessions/chat/messages', token, body)).status, 202); assert.equal(uploaded, 1);
   assert.deepEqual(await readdir(join(root, 'mobile-uploads')), []);
 });
@@ -363,6 +370,21 @@ test('host image staging reserves concurrent bytes while file receipt staging re
   const fileToken = pair().deviceToken;
   const file = await fetch(baseUrl + '/v1/sessions/chat/uploads', { method: 'POST', headers: { Authorization: 'Bearer ' + fileToken, 'Content-Type': 'application/octet-stream' }, body: Buffer.alloc(UPLOAD_LIMIT) });
   assert.equal(file.status, 201, 'disk-backed files do not consume the image RAM budget');
+});
+
+test('upload display names are normalized for Windows upstream storage without rejecting phone names', async t => {
+  assert.equal(portableUploadName('Screenshot 12:30.png'), 'Screenshot 12_30.png');
+  assert.equal(portableUploadName('report.txt:secret'), 'report.txt_secret');
+  for (const name of ['CON', 'con.txt', 'Nul.tar.gz', 'COM1.png', 'lpt9', 'COM¹.txt']) assert.equal(portableUploadName(name), '_' + name);
+  assert.equal(portableUploadName('notes. . '), 'notes'); assert.equal(portableUploadName('...'), 'upload');
+  for (const name of ['console.txt', 'com10.png', 'holiday.jpg', 'Фото 1.jpg']) assert.equal(portableUploadName(name), name);
+  const { adapter, pair, baseUrl } = await setup(t);
+  adapter.phoneCapabilities = () => ({ steer: true, queue: true, rename: true, models: true, questions: false, attachments: true });
+  const names: string[] = [];
+  adapter.upload = async (_id, input) => { for await (const _ of input.data); names.push(input.name); return { ref: { id: 'image-fixture', name: input.name, size: input.size, mime: input.mime, kind: 'image' }, upstream: { type: 'image', data: 'synthetic' } }; };
+  const token = pair().deviceToken;
+  const upload = await fetch(baseUrl + '/v1/sessions/chat/uploads', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'image/png', 'X-File-Name': encodeURIComponent('aux.png:stream') }, body: 'synthetic' });
+  assert.equal(upload.status, 201); assert.deepEqual(names, ['_aux.png_stream']);
 });
 
 test('attachment intake gates auth/scope, type, size, names, stages per device and downloads images', async t => {

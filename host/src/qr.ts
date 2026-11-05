@@ -25,3 +25,9 @@ export async function terminalInvitationQr(invitation: unknown): Promise<{ text:
   const text = await QRCode.toString([{ data: Buffer.from(payload, 'ascii'), mode: 'byte' }], { type: 'utf8', errorCorrectionLevel: 'M', margin: 4 });
   return { text: '\x1b[30;47m' + text + '\x1b[0m\n', version: symbol.version, characters: payload.length };
 }
+/** Same one-use payload as the terminal QR, rendered for the local Settings page. */
+export async function invitationQrSvg(invitation: unknown): Promise<{ svg: string; version: number; characters: number }> {
+  const symbol = invitationQr(invitation), payload = encodeInvitationQr(invitation);
+  const svg = await QRCode.toString([{ data: Buffer.from(payload, 'ascii'), mode: 'byte' }], { type: 'svg', errorCorrectionLevel: 'M', margin: 2 });
+  return { svg, version: symbol.version, characters: payload.length };
+}

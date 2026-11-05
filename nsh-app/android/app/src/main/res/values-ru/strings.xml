@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="done">Готово</string>
+    <string name="app_label">DSH</string>
+    <string name="channel_answers">Готовые ответы</string>
+    <string name="channel_decisions">Агент ждёт решения</string>
+    <string name="channel_watching">Слежение за работой</string>
+    <string name="notify_answer">Ответ готов</string>
+    <string name="notify_failed">Остановился с ошибкой</string>
+    <string name="notify_decision">Агент ждёт вашего решения</string>
+    <string name="watching">DSH следит за чатами</string>
+    <string name="watching_stop">Остановить</string>
+</resources>

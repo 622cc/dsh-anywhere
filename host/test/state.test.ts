@@ -33,6 +33,24 @@ test('0.7.0 accepted creates seed bounded blank exceptions exactly once on upgra
   assert.equal(updated.mobileSessionVisible('legacy-1', true), false);
 });
 
+test('direct device credentials expire after a year while 0.7.0-paired devices stay valid until revoked', async t => {
+  const { HostState: OldState } = await legacyModule('state', t);
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'mobile-device-lifetime-'))), path = join(dir, 'host.sqlite');
+  let now = 1_800_000_000_000;
+  const old = new OldState(path, { now: () => now });
+  const legacy = old.consumePairing(old.createPairing(grants).pairingToken, 'Legacy phone'); old.close();
+  const state = new HostState(path, { now: () => now });
+  t.after(() => { state.close(); rmSync(dir, { recursive: true, force: true }); });
+  const fresh = state.consumePairing(state.createPairing(grants).pairingToken, 'New phone');
+  now += 365 * 24 * 60 * 60_000 - 1;
+  assert.equal(state.authenticate(fresh.deviceToken)?.deviceId, fresh.deviceId);
+  now += 1;
+  assert.equal(state.authenticate(fresh.deviceToken), undefined); assert.equal(state.getDevice(fresh.deviceId), undefined);
+  now += 365 * 24 * 60 * 60_000;
+  assert.equal(state.authenticate(legacy.deviceToken)?.deviceId, legacy.deviceId, 'upgrade must not lock out existing devices');
+  state.revokeDevice(legacy.deviceId); assert.equal(state.authenticate(legacy.deviceToken), undefined);
+});
+
 test('mobile-created blank exceptions expire, retire on engagement, and remain bounded', t => {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mobile-created-'))); let now = 1000;
   const state = new HostState(join(dir, 'host.sqlite'), { now: () => now });

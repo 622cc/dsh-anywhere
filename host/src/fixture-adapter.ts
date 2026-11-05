@@ -3,7 +3,7 @@ import type { HostAdapter, HostSession, HostSnapshot, Preset } from './types.ts'
 
 /** All content is synthetic. This adapter has no DSH, model or network dependency. */
 export const FIXTURE = Object.freeze({
-  hostName: 'DSH Mobile demo — not connected to DSH', workspaceId: 'demo', workspaceName: 'Demo workspace',
+  hostName: 'DSH Anywhere demo — not connected to DSH', workspaceId: 'demo', workspaceName: 'Demo workspace',
   existingSessionId: 'demo-session', existingSessionTitle: 'Synthetic example',
   existingMessage: 'This is a synthetic conversation. No model or DSH runtime is connected.',
   createdSessionTitle: 'Demo conversation', expectedAssistantText: 'Synthetic demo answer. No model was called.',

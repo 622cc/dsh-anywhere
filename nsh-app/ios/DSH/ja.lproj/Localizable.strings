@@ -1,0 +1,5 @@
+"done" = "完了";
+"scan_title" = "ペアリングコードをスキャン";
+"notify_answer" = "回答ができました";
+"notify_failed" = "エラーで停止しました";
+"notify_decision" = "エージェントが判断を求めています";

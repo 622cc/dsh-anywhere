@@ -1,18 +1,48 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from 'node:fs/promises';
+import { lstat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { loadConfiguration, pairingInvitation, prepareConfiguration, validOpaqueId, validateBaseUrl } from './config.ts';
 import type { LocalHostConfiguration } from './config.ts';
 import { HostError, publicError } from './errors.ts';
-import { HostState, isRequestId, validateGrants } from './state.ts';
+import { HostState, hashSecret, isRequestId, validateGrants } from './state.ts';
 import type { DeviceGrants } from './types.ts';
 import { setupDirect, declaredDshVersion } from './setup-direct.ts';
-import { privateDirectory, privatePath, privateWrite, privateRead, assertPrivate as privateReadDirectory } from './private-files.ts';
+import { privateDirectory, privatePath, privateWrite, privateRead, protectNewFile, assertPrivate as privateReadDirectory } from './private-files.ts';
 import { terminalInvitationQr, encodeInvitationQr } from './qr.ts';
+import { setupTailcat } from './setup-tailcat.ts';
+import { TAILCAT_NORMAL_PORT, TAILCAT_PAIRING_PORT } from './tailcat-connector.ts';
+import { serveLocalPairing } from './local-pairing.ts';
+import type { LocalPairingOptions } from './local-pairing.ts';
+import { isEntryPoint } from './entry-point.ts';
 
 export interface AdminIo { out: (text: string) => void; error: (text: string) => void }
-export interface AdminOptions { /** Programmatic tests only; CLI release never permits WS. */ allowInsecureRelayLoopback?: boolean }
+export interface AdminOptions {
+  /** Programmatic tests only; CLI release never permits WS. */ allowInsecureRelayLoopback?: boolean;
+  /** Programmatic tests only: same-Wi-Fi pairing seams (advertiser, operator answer, bind). */
+  localPairing?: Partial<Pick<LocalPairingOptions, 'advertise' | 'confirm' | 'host' | 'onListening'>>;
+  /** Programmatic tests only: how long pair --tailcat waits for the running companion. */
+  tailcatWaitMs?: number;
+}
+/** Operator answer on the terminal; anything but y/yes denies. */
+async function terminalConfirm(code: string, device: string, io: AdminIo): Promise<boolean> {
+  io.error(`"${device}" wants to pair. Check that the phone shows code ${code}. Allow? [y/N] `);
+  const { createInterface } = await import('node:readline');
+  const reader = createInterface({ input: process.stdin, terminal: false });
+  try { const answer = await new Promise<string>(resolve => reader.once('line', resolve).once('close', () => resolve(''))); return /^\s*y(es)?\s*$/i.test(answer); }
+  finally { reader.close(); }
+}
+/** The plugin process owns the helper; the CLI asks through the state database (docs/TAILCAT.md). */
+async function waitTailcatPairing(state: HostState, id: string, deadlineMs: number) {
+  const end = Date.now() + deadlineMs;
+  while (Date.now() < end) {
+    const request = state.tailcatPairingRequest(id);
+    if (!request || request.status === 'failed') break;
+    if (request.status === 'open' && request.address && request.clientKey && request.proof && request.expiresAt && request.expiresAt > Date.now() + 90_000) return request as Required<typeof request>;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new HostError('tailcat_unavailable');
+}
 async function invitationOutput(invitation: unknown, flags: Map<string, string | true>, configPath: string, io: AdminIo): Promise<void> {
   const qr = flags.get('--qr') === true;
   if (qr) encodeInvitationQr(invitation); // Validate protocol size before creating any fallback file.
@@ -22,7 +52,8 @@ async function invitationOutput(invitation: unknown, flags: Map<string, string |
     const path = await privatePath(output), invitations = await privatePath(join(dirname(configPath), 'invitations'));
     if (dirname(path) !== invitations) throw new HostError('unsafe_private_path');
     await privateDirectory(invitations);
-    await privateWrite(path, JSON.stringify(invitation) + '\n');
+    try { await privateWrite(path, JSON.stringify(invitation) + '\n'); }
+    catch (error) { throw (error as NodeJS.ErrnoException).code === 'EEXIST' ? new HostError('invitation_output_exists') : error; }
     io.out('Private one-use invitation JSON written. Do not share it.\n');
   }
   if (qr) {
@@ -48,7 +79,7 @@ async function waitPublication(state: HostState, routeId: string, accessId: stri
   }
   throw new HostError('unavailable');
 }
-const HELP = `DSH Mobile local administration (no remote admin listener)\n\nsetup-direct --config <new-private-dir/host.json> --host <DNS-or-IP> [--host <SAN>...]\n     [--port 19445] [--bind 0.0.0.0] [--dsh-version auto|<verified-version>] [--openssl <executable>]\ninit --config <private.json> --workspace <directory> [--dev-http]\n     [--host-name <name>] [--bind <IP>] [--port <port>]\n     [--cert <PEM> --key <PEM>] [--url <HTTPS URL>] [--include-certificate]\npair --config <private.json> --read all|<ids> [--execute all|<ids>] [--ttl <seconds>] [--url <URL>] (--qr and/or --output <private-invitations/file.json>)\nremote-pair --config <private.json> --read all|<ids> [--execute all|<ids>] --output <private-invitations/file.json> [--qr]\ngrant --config <private.json> --device <id> --read all|<ids> [--execute all|<ids>]\nremote-status --config <private.json>\ndevices --config <private.json>\nrevoke --config <private.json> --device <id>\n\nRegistry mode accepts all only; explicit IDs require explicit-list mode.\nOmitted --execute means read-only, including grant replacement.\nPair requires explicit --qr and/or --output; remote-pair requires --output. No offer is created without opt-in.\nInvitation JSON is never printed to stdout. QR/private files contain one-use secrets; keep them private.\nsetup-direct requires OpenSSL 3 for P-256 X.509; Node 24 alone cannot create certificates.\nQR uses dshm1 zlib/base64url, correction M. No OS trust or networking is changed.\n`;
+const HELP = `DSH Anywhere local administration (no remote admin listener)\n\nsetup-tailcat --config <new-private-dir/host.json> [--port 19445] [--host-name <name>] [--dsh-version auto|<verified-version>]\n     (Tailcat transport v3: loopback companion, native TLS identity, no OpenSSL; see docs/TAILCAT.md)\npair --config <private.json> --tailcat --read all [--execute all] (--qr and/or --output <file> | --local)\n     (--local: same-Wi-Fi Bonjour pairing with a 6-digit code, macOS)\ntailcat-status --config <private.json>\nsetup-direct --config <new-private-dir/host.json> --host <DNS-or-IP> [--host <SAN>...]\n     [--port 19445] [--bind 0.0.0.0] [--dsh-version auto|<verified-version>] [--openssl <absolute executable>]\ninit --config <private.json> --workspace <directory> [--dev-http]\n     [--host-name <name>] [--bind <IP>] [--port <port>]\n     [--cert <PEM> --key <PEM>] [--url <HTTPS URL>] [--include-certificate]\npair --config <private.json> --read all|<ids> [--execute all|<ids>] [--ttl <seconds>] [--url <URL>] (--qr and/or --output <private-invitations/file.json>)\nremote-pair --config <private.json> --read all|<ids> [--execute all|<ids>] --output <private-invitations/file.json> [--qr]\ngrant --config <private.json> --device <id> --read all|<ids> [--execute all|<ids>]\nremote-status --config <private.json>\ndevices --config <private.json>\nrevoke --config <private.json> --device <id>\n\nRegistry mode accepts all only; explicit IDs require explicit-list mode.\nOmitted --execute means read-only, including grant replacement.\nPair requires explicit --qr and/or --output; remote-pair requires --output. No offer is created without opt-in.\nInvitation JSON is never printed to stdout. QR/private files contain one-use secrets; keep them private.\nsetup-direct requires OpenSSL 3 for P-256 X.509; Node 24 alone cannot create certificates.\nQR uses dshm1 zlib/base64url, correction M. No OS trust or networking is changed.\n`;
 function argumentsFor(argv: string[]) {
   const command = argv[0] ?? 'help';
   const flags = new Map<string, string | true>();
@@ -57,7 +88,7 @@ function argumentsFor(argv: string[]) {
     const flag = argv[index]!;
     if (flag === '--host' && command === 'setup-direct') { const host = argv[++index]; if (!host || host.startsWith('--')) throw new HostError('invalid_request'); hosts.push(host); continue; }
     if (!flag.startsWith('--') || flags.has(flag)) throw new HostError('invalid_request');
-    if (['--dev-http', '--include-certificate', '--qr'].includes(flag)) flags.set(flag, true);
+    if (['--dev-http', '--include-certificate', '--qr', '--tailcat', '--local'].includes(flag)) flags.set(flag, true);
     else { const value = argv[++index]; if (!value || value.startsWith('--')) throw new HostError('invalid_request'); flags.set(flag, value); }
   }
   return { command, flags, hosts };
@@ -90,18 +121,24 @@ export async function runAdminCli(argv: string[], io: AdminIo = { out: text => p
   try {
     const { command, flags, hosts } = argumentsFor(argv);
     if (command === 'help' || command === '--help') { io.out(HELP); return 0; }
-    const known = command === 'verify-config' ? ['--config'] : command === 'setup-direct' ? ['--config', '--port', '--bind', '--host-name', '--dsh-version', '--openssl'] : command === 'init' ? ['--config', '--workspace', '--dev-http', '--host-name', '--bind', '--port', '--cert', '--key', '--url', '--include-certificate'] : command === 'pair' ? ['--config', '--read', '--execute', '--ttl', '--url', '--qr', '--output'] : command === 'remote-pair' ? ['--config', '--read', '--execute', '--ttl', '--output', '--qr'] : command === 'grant' ? ['--config', '--device', '--read', '--execute'] : command === 'remote-status' ? ['--config'] : command === 'devices' ? ['--config'] : command === 'revoke' ? ['--config', '--device'] : [];
+    const known = command === 'verify-config' || command === 'tailcat-status' ? ['--config'] : command === 'setup-tailcat' ? ['--config', '--port', '--host-name', '--dsh-version'] : command === 'setup-direct' ? ['--config', '--port', '--bind', '--host-name', '--dsh-version', '--openssl'] : command === 'init' ? ['--config', '--workspace', '--dev-http', '--host-name', '--bind', '--port', '--cert', '--key', '--url', '--include-certificate'] : command === 'pair' ? ['--config', '--read', '--execute', '--ttl', '--url', '--qr', '--output', '--tailcat', '--local'] : command === 'remote-pair' ? ['--config', '--read', '--execute', '--ttl', '--output', '--qr'] : command === 'grant' ? ['--config', '--device', '--read', '--execute'] : command === 'remote-status' ? ['--config'] : command === 'devices' ? ['--config'] : command === 'revoke' ? ['--config', '--device'] : [];
     if (!known.length || [...flags.keys()].some(flag => !known.includes(flag))) throw new HostError('invalid_request');
     // Refuse implicit secret output before loading config or creating state/offers/grants.
-    if ((command === 'pair' && flags.get('--qr') !== true && !flags.has('--output')) || (command === 'remote-pair' && !flags.has('--output'))) throw new HostError('invitation_output_required');
+    if ((command === 'pair' && flags.get('--qr') !== true && !flags.has('--output') && flags.get('--local') !== true) || (flags.has('--local') && flags.get('--tailcat') !== true) || (command === 'remote-pair' && !flags.has('--output'))) throw new HostError('invitation_output_required');
     const configArgument = value(flags, '--config');
-    if ((command === 'setup-direct' || command === 'verify-config') && !isAbsolute(configArgument)) throw new HostError('unsafe_private_path');
+    if ((command === 'setup-direct' || command === 'setup-tailcat' || command === 'verify-config') && !isAbsolute(configArgument)) throw new HostError('unsafe_private_path');
     const configPath = resolve(configArgument);
     if (command === 'setup-direct') {
       const rawPort = value(flags, '--port', '19445');
       if (!/^\d{1,5}$/.test(rawPort)) throw new HostError('invalid_request');
-      const result = await setupDirect({ configPath, hosts, port: Number(rawPort), bind: value(flags, '--bind', '0.0.0.0'), hostName: value(flags, '--host-name', 'DSH Mobile companion'), dshVersion: value(flags, '--dsh-version', 'auto'), ...(flags.has('--openssl') ? { openssl: value(flags, '--openssl') } : {}) });
+      const result = await setupDirect({ configPath, hosts, port: Number(rawPort), bind: value(flags, '--bind', '0.0.0.0'), hostName: value(flags, '--host-name', 'DSH Anywhere companion'), dshVersion: value(flags, '--dsh-version', 'auto'), ...(flags.has('--openssl') ? { openssl: value(flags, '--openssl') } : {}) });
       io.out(JSON.stringify({ ...result, workspaceSource: 'dsh-registry', message: 'Private configuration verified. No listener, firewall, OS trust or DSH profile changed.' }) + '\n'); return 0;
+    }
+    if (command === 'setup-tailcat') {
+      const rawPort = value(flags, '--port', '19445');
+      if (!/^\d{1,5}$/.test(rawPort)) throw new HostError('invalid_request');
+      const result = await setupTailcat({ configPath, port: Number(rawPort), dshVersion: value(flags, '--dsh-version', 'auto'), ...(flags.has('--host-name') ? { hostName: value(flags, '--host-name') } : {}) });
+      io.out(JSON.stringify({ ...result, transport: 'tailcat', workspaceSource: 'dsh-registry', message: 'Private configuration verified. No listener, firewall, OS trust or DSH profile changed.' }) + '\n'); return 0;
     }
     if (command === 'init') {
       const devHttp = flags.get('--dev-http') === true;
@@ -110,7 +147,7 @@ export async function runAdminCli(argv: string[], io: AdminIo = { out: text => p
       const cert = flags.get('--cert'), key = flags.get('--key');
       if ((cert && !key) || (key && !cert) || (devHttp && (cert || key))) throw new HostError('invalid_request');
       const candidate: LocalHostConfiguration = {
-        hostName: value(flags, '--host-name', 'DSH Mobile'), bind: value(flags, '--bind', '127.0.0.1'), port: Number(rawPort),
+        hostName: value(flags, '--host-name', 'DSH Anywhere'), bind: value(flags, '--bind', '127.0.0.1'), port: Number(rawPort),
         statePath: join(dirname(configPath), 'state', 'host.sqlite'),
         workspaces: [{ id: 'default', name: 'Default workspace', path: resolve(value(flags, '--workspace')) }],
         ...(devHttp ? { allowInsecureLoopback: true } : {}),
@@ -120,8 +157,12 @@ export async function runAdminCli(argv: string[], io: AdminIo = { out: text => p
       };
       if (candidate.includeCertificatePem && !candidate.tls) throw new HostError('invalid_config');
       const prepared = await prepareConfiguration(candidate);
-      await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+      // Owner-only ACLs on Windows too (POSIX modes alone are ignored there). A new directory is created
+      // private; an existing one is left as configured, but the written config file itself is protected.
+      try { await lstat(dirname(configPath)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; await privateDirectory(dirname(configPath)); }
       await writeFile(configPath, JSON.stringify(prepared.config, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+      await protectNewFile(configPath);
       state = new HostState(prepared.config.statePath);
       io.out('Private configuration and state initialized. No server or network was changed.\n'); return 0;
     }
@@ -134,9 +175,15 @@ export async function runAdminCli(argv: string[], io: AdminIo = { out: text => p
       const checked = await prepareConfiguration(raw);
       io.out(JSON.stringify({ valid: true, baseUrl: checked.config.publicUrl, workspaceSource: checked.config.workspaceSource ?? 'explicit', port: checked.config.port }) + '\n'); return 0;
     }
-    const config = await loadConfiguration(configPath, { administrationOnly: command === 'devices' || command === 'revoke' || command === 'remote-status' || command === 'grant', allowInsecureRelayLoopback: options.allowInsecureRelayLoopback === true });
+    const config = await loadConfiguration(configPath, { administrationOnly: command === 'devices' || command === 'revoke' || command === 'remote-status' || command === 'tailcat-status' || command === 'grant', allowInsecureRelayLoopback: options.allowInsecureRelayLoopback === true });
     if (!isAbsolute(config.statePath)) throw new HostError('invalid_config');
     state = new HostState(config.statePath);
+    if (command === 'tailcat-status') {
+      if (!config.tailcat) throw new HostError('invalid_config');
+      const snapshot = state.tailcatSnapshot(), counts = state.tailcatClientCounts();
+      // Address and counts only: never the node state, keys or allowlist entries.
+      io.out(JSON.stringify({ transport: 'tailcat', running: snapshot.running, address: snapshot.address, allowedClients: snapshot.allowedClients.length, pairedPhones: counts.linked, pendingPhones: counts.pending, updatedAt: snapshot.updatedAt, stale: Date.now() - snapshot.updatedAt > 10_000 }) + '\n'); return 0;
+    }
     if (command === 'remote-status') {
       if (!config.relay) {
         io.out(JSON.stringify({ mode: 'direct', baseUrl: config.publicUrl, bind: config.bind, port: config.port, workspaceSource: config.workspaceSource ?? 'explicit', message: 'Configuration only; use Get-NetTCPConnection to verify listener readiness.' }) + '\n'); return 0;
@@ -159,6 +206,39 @@ export async function runAdminCli(argv: string[], io: AdminIo = { out: text => p
         await invitationOutput(invitation, flags, configPath, io);
       } catch { state.revokeRelayGrant(offer.relayAccess.accessId); throw new HostError('unavailable'); }
       io.out('Private remote invitation written after relay publication acknowledgement.\n'); return 0;
+    }
+    if (command === 'pair' && flags.get('--tailcat') === true) {
+      if (!config.tailcat || flags.has('--url')) throw new HostError('invalid_config');
+      const grants = selectedGrants(config, flags);
+      const seconds = value(flags, '--ttl', '300');
+      if (!/^\d+$/.test(seconds) || Number(seconds) < 1 || Number(seconds) > 900) throw new HostError('invalid_request');
+      const prepared = await prepareConfiguration(config);
+      pairingInvitation(prepared, ''); // Validate pin/trust before issuing an offer.
+      // A one-use file is never overwritten; refuse before opening a window the phone could never use.
+      if (flags.has('--output') && existsSync(value(flags, '--output'))) throw new HostError('invitation_output_exists');
+      const offer = state.createPairing(grants, Number(seconds) * 1000);
+      const template = { ...pairingInvitation(prepared, offer.pairingToken), version: 4, tailcat: { address: '$TAILCAT_ADDRESS', port: TAILCAT_NORMAL_PORT } };
+      const requestId = state.requestTailcatPairing(hashSecret(offer.pairingToken), offer.expiresAt, JSON.stringify(template));
+      try {
+        const window = await waitTailcatPairing(state, requestId, options.tailcatWaitMs ?? 20_000);
+        const expiresAt = Math.min(window.expiresAt, offer.expiresAt);
+        const bootstrap = { version: 1, expiresAt,
+          tailcat: { address: window.address, port: TAILCAT_PAIRING_PORT, key: window.clientKey, proof: window.proof } };
+        state.forgetTailcatPairing(requestId);
+        if (flags.get('--local') === true) {
+          io.error(`Same-Wi-Fi pairing open until ${new Date(expiresAt).toLocaleTimeString()}. On the phone choose "Find computer on this Wi-Fi".\n`);
+          await serveLocalPairing({ invitation: JSON.stringify(bootstrap), expiresAt, serviceName: config.hostName,
+            confirm: options.localPairing?.confirm ?? ((code, device) => terminalConfirm(code, device, io)),
+            ...(options.localPairing?.advertise ? { advertise: options.localPairing.advertise } : {}),
+            ...(options.localPairing?.host ? { host: options.localPairing.host } : {}),
+            ...(options.localPairing?.onListening ? { onListening: options.localPairing.onListening } : {}) });
+          io.out('Invitation sent to the approved phone. It finishes pairing over Tailcat.\n');
+        } else await invitationOutput(bootstrap, flags, configPath, io);
+      } catch (error) {
+        state.forgetTailcatPairing(requestId); state.cancelPairing(offer.pairingToken);
+        throw error instanceof HostError ? error : new HostError('tailcat_unavailable');
+      }
+      return 0;
     }
     if (command === 'pair') {
       const grants = selectedGrants(config, flags);
@@ -186,4 +266,4 @@ export async function runAdminCli(argv: string[], io: AdminIo = { out: text => p
     io.error(`${safe.code}: ${safe.message}\n`); return 1;
   } finally { state?.close(); }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) process.exitCode = await runAdminCli(process.argv.slice(2));
+if (isEntryPoint(import.meta.url)) process.exitCode = await runAdminCli(process.argv.slice(2));

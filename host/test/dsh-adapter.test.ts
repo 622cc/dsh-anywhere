@@ -15,6 +15,7 @@ import { FixtureAdapter, FIXTURE, MULTI_PROJECT_FIXTURE } from '../src/fixture-a
 import { createWorkspaceSource } from '../src/workspace-source.ts';
 import { HostState } from '../src/state.ts';
 import { NotificationFeed } from '../src/notifications.ts';
+import { computerName } from '../src/computer-name.ts';
 
 async function harness(t: { after: (fn: () => Promise<void>) => void }, pollIntervalMs = 10000) {
   const dir = realpathSync.native(await mkdtemp(join(tmpdir(), 'dsh-mobile-adapter-')));
@@ -622,6 +623,111 @@ test('a required future event fails closed while ignorable extension data stays 
   assert.equal(JSON.stringify(unknown).includes('PRIVATE'), false);
 });
 
+// DSH 0.2.1-rc.2 and rc.3 append these without the ignorable marker (dsh-jobs-local
+// recordSessionEvent, dsh-working-directory commit; listed in dsh-session known-event-types).
+// They are log metadata, never chat messages. Inspected in the rc.3 runtime on 2026-10-28.
+test('background job and working-directory events keep the chat readable', async (t) => {
+  const h = await harness(t);
+  const before = await h.adapter.snapshot('session-fixture', new AbortController().signal);
+  const job = { jobId: 'job-1', owner: 'agent-1', kind: 'shell', label: 'synthetic', startedAt: 1700000000008 };
+  h.frame.records.push(
+    { type: 'event', event: { seq: 8, time: 1700000000008, type: 'job/registered', data: job } } as any,
+    { type: 'event', event: { seq: 9, time: 1700000000009, type: 'working-directory/change', data: { cwd: '/synthetic/dir' } } } as any,
+    { type: 'event', event: { seq: 10, time: 1700000000010, type: 'job/settled', data: { ...job, status: 'exited' } } } as any,
+  );
+  h.frame.cursor = 10;
+  const after = await h.adapter.snapshot('session-fixture', new AbortController().signal);
+  assert.equal(after.activity, 'idle');
+  assert.equal(after.notice, undefined);
+  assert.deepEqual(after.messages, before.messages, 'metadata events add no messages and hide none');
+  assert.equal(after.cursor, 10);
+  assert.equal(JSON.stringify(after).includes('/synthetic/dir'), false);
+});
+
+// The real-DSH registry canary shows rc.2/rc.3 can stall a fresh follow (blocked in Cordis ctx.on)
+// after subagent activity. A stalled first frame must fail the read, never hang the phone forever.
+test('a DSH follow that never yields its first frame fails the read within the opening timeout', async (t) => {
+  const h = await harness(t);
+  let returned = 0;
+  const stalled = {
+    ...h.controller,
+    follow() { return { [Symbol.asyncIterator]() { return { next: () => new Promise<never>(() => {}), return: () => { returned++; return new Promise<never>(() => {}); } }; } }; },
+  };
+  const adapter = await createDshAdapter({ dshVersion: '0.2.1-rc.3', sessionController: stalled, workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }], openTimeoutMs: 200 } as any);
+  t.after(async () => { adapter.dispose(); });
+  const started = Date.now();
+  await assert.rejects(adapter.snapshot('session-fixture', new AbortController().signal), { code: 'unavailable' });
+  assert.ok(Date.now() - started < 2000, `failed after ${Date.now() - started} ms`);
+  assert.equal(returned, 1, 'the stalled follow was asked to stop');
+});
+
+// Tool steps and thinking, as DSH's own ACP bridge (dsh-acp, rc.3) derives them from tool/call,
+// tool/result and assistant reasoning blocks. Titles come only from known argument fields; raw
+// arguments and tool output never reach the phone in this projection.
+function stepTurn(seq: number, turn: number) {
+  const ev = (type: string, data: unknown, surface = false) => ({ type: 'event', event: { seq: seq++, time: 1700000001000 + seq, type, ...(surface ? { surfaceOp: 'append' } : {}), data } });
+  const source = { kind: 'model', provider: 'fixture', model: 'none' };
+  return [
+    ev('turn/start', { turn }),
+    ev('user/message', { id: `user-${turn}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Synthetic check.' }] }, true),
+    ev('assistant/message', { turn, step: 1, message: { id: `plan-${turn}`, role: 'assistant', source, content: [{ type: 'reasoning', text: 'Look at the repository first.' }, { type: 'tool-call', id: `bash-${turn}`, name: 'bash', arguments: '{}' }] }, stream: [] }, true),
+    ev('tool/call', { turn, step: 1, callId: `bash-${turn}`, name: 'bash', arguments: JSON.stringify({ command: 'git log -1 --token=SECRET-ARG', description: 'Check current repo state' }) }),
+    ev('tool/result', { turn, step: 1, message: { id: `result-${turn}`, role: 'tool', source: { kind: 'tool', callId: `bash-${turn}` }, toolCallId: `bash-${turn}`, content: [{ type: 'text', text: 'SECRET-OUTPUT' }] } }, true),
+    ev('tool/call', { turn, step: 2, callId: `read-${turn}`, name: 'read', arguments: JSON.stringify({ file_path: '/fixture/alpha/src/app.ts' }) }),
+    ev('tool/result', { turn, step: 2, message: { id: `result-read-${turn}`, role: 'tool', source: { kind: 'tool', callId: `read-${turn}` }, toolCallId: `read-${turn}`, isError: true, content: [{ type: 'text', text: 'SECRET-OUTPUT' }] } }, true),
+    ev('assistant/message', { turn, step: 3, message: { id: `answer-${turn}`, role: 'assistant', source, content: [{ type: 'text', text: 'Done.' }] }, stream: [] }, true),
+    ev('turn/end', { turn, reason: { kind: 'completed' } }),
+  ];
+}
+
+test('history shows thinking and tool steps with titles and status, never arguments or output', async (t) => {
+  const h = await harness(t);
+  h.frame.records.push(...stepTurn(8, 2) as any[]); h.frame.cursor = 16;
+  const result = await h.adapter.snapshot('session-fixture', new AbortController().signal);
+  const tail = result.messages.slice(-5).map(m => ({ id: m.id, kind: m.kind, text: m.text, step: (m as any).step }));
+  assert.deepEqual(tail, [
+    { id: 'user-2', kind: 'message', text: 'Synthetic check.', step: undefined },
+    { id: 'thought:plan-2', kind: 'thought', text: 'Look at the repository first.', step: undefined },
+    { id: 'step:bash-2', kind: 'step', text: 'Check current repo state', step: { callId: 'bash-2', tool: 'bash', kind: 'execute', status: 'completed' } },
+    { id: 'step:read-2', kind: 'step', text: 'Read src/app.ts', step: { callId: 'read-2', tool: 'read', kind: 'read', status: 'failed' } },
+    { id: 'answer-2', kind: undefined, text: 'Done.', step: undefined },
+  ]);
+  assert.equal(result.activity, 'idle');
+  const wire = JSON.stringify(result);
+  assert.equal(wire.includes('SECRET'), false, 'neither raw arguments nor tool output are projected');
+});
+
+test('a running tool step appears live and settles when its result arrives', async (t) => {
+  const h = await harness(t);
+  const steps = stepTurn(8, 2) as any[];
+  const lifetime = new AbortController(); t.after(() => lifetime.abort());
+  const iterator = h.adapter.watch('session-fixture', lifetime.signal)[Symbol.asyncIterator]();
+  await iterator.next();
+  const next = async (count: number) => { let value; for (let i = 0; i < count; i++) { const pending = iterator.next(); h.emit(steps.shift()); value = (await pending).value; } return value!; };
+  let live = await next(4); // turn/start, user, plan with thinking, bash tool/call
+  let bash = live.messages.find(m => m.id === 'step:bash-2') as any;
+  assert.equal(bash.step.status, 'in_progress');
+  assert.equal(live.activity, 'running');
+  assert.equal(live.activityDetail?.tool, 'bash');
+  live = await next(1); // bash result
+  bash = live.messages.find(m => m.id === 'step:bash-2') as any;
+  assert.equal(bash.step.status, 'completed');
+  assert.equal(JSON.stringify(live).includes('SECRET'), false);
+});
+
+test('tool steps do not push conversation messages out of the history window', async (t) => {
+  const h = await harness(t);
+  let seq = 8;
+  const many: unknown[] = [{ type: 'event', event: { seq: seq++, time: 1700000002000, type: 'turn/start', data: { turn: 2 } } }];
+  for (let n = 0; n < 150; n++) many.push({ type: 'event', event: { seq: seq++, time: 1700000002000 + n, type: 'tool/call', data: { turn: 2, step: n, callId: `c-${n}`, name: 'bash', arguments: JSON.stringify({ command: 'true', description: `Step ${n}` }) } } });
+  many.push({ type: 'event', event: { seq: seq++, time: 1700000003000, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } } });
+  h.frame.records.push(...many as any[]); h.frame.cursor = seq - 1;
+  const result = await h.adapter.snapshot('session-fixture', new AbortController().signal);
+  assert.ok(result.messages.some(m => m.id === 'user-1'), 'the question survives');
+  assert.ok(result.messages.some(m => m.id === 'assistant-2'), 'the answer survives');
+  assert.equal(result.messages.filter(m => m.kind === 'step').length, 150);
+});
+
 test('known pending questions and approvals show a desktop notice instead of idle', async (t) => {
   const h = await harness(t);
   (h.frame.projections.values.userQuestions.active as unknown[]).push({ callId: 'question-1', state: 'continued', questions: [{ id: 'one', question: 'PRIVATE QUESTION CONTENT' }] });
@@ -716,11 +822,20 @@ test('request-local cwd dedup is bounded and retries missing paths on the next l
 test('operator-declared unsupported versions are rejected and no preset registry means host default only', async (t) => {
   const h = await harness(t);
   const options = { sessionController: h.controller, workspaces: [{ id: 'alpha', name: 'Alpha', path: h.alpha }] };
-  await assert.rejects(createDshAdapter({ ...options, dshVersion: '0.2.0-rc.3' }), { code: 'unsupported_dsh_version', message: 'Supported DSH versions: 0.2.0-rc.2, 0.2.1-alpha.1. Check dsh --version before declaring dshVersion.' });
+  await assert.rejects(createDshAdapter({ ...options, dshVersion: '0.2.0-rc.3' }), { code: 'unsupported_dsh_version', message: 'Supported DSH versions: 0.2.0-rc.2 and every 0.2.1 release or pre-release. Check dsh --version before declaring dshVersion.' });
+  await assert.rejects(createDshAdapter({ ...options, dshVersion: '0.2.2-alpha.2' }), { code: 'unsupported_dsh_version' });
   const alpha = await createDshAdapter({ ...options, dshVersion: '0.2.1-alpha.1' });
   t.after(async () => { alpha.dispose(); });
   assert.equal(alpha.upstreamVersion, '0.2.1-alpha.1');
   assert.equal((await alpha.listSessions(new AbortController().signal)).length, 1);
+  const rc2 = await createDshAdapter({ ...options, dshVersion: '0.2.1-rc.2' });
+  t.after(async () => { rc2.dispose(); });
+  assert.equal(rc2.upstreamVersion, '0.2.1-rc.2');
+  assert.equal((await rc2.listSessions(new AbortController().signal)).length, 1);
+  const rc3 = await createDshAdapter({ ...options, dshVersion: '0.2.1-rc.3' });
+  t.after(async () => { rc3.dispose(); });
+  assert.equal(rc3.upstreamVersion, '0.2.1-rc.3');
+  assert.equal((await rc3.listSessions(new AbortController().signal)).length, 1);
   const noPresets = await createDshAdapter({ ...options, dshVersion: '0.2.0-rc.2' });
   t.after(async () => { noPresets.dispose(); });
   assert.deepEqual(await noPresets.listPresets(new AbortController().signal), []);
@@ -794,8 +909,9 @@ test('demo composition intentionally issues only a local fixture invitation and 
   assert.equal(pairing.status, 201);
   const grant = await pairing.json() as { deviceToken: string };
   const capabilities = await fetch(`${baseUrl}/v1/capabilities`, { headers: { authorization: `Bearer ${grant.deviceToken}` } });
-  const value = await capabilities.json() as { upstreamVersion: string; hostName: string };
+  const value = await capabilities.json() as { upstreamVersion: string; hostName: string; computerName: string };
   assert.equal(value.upstreamVersion, 'fixture'); assert.equal(value.hostName, FIXTURE.hostName);
+  assert.equal(value.computerName, await computerName());
   await demo.close(); await demo.close();
   await assert.rejects(fetch(`${baseUrl}/v1/capabilities`));
 });

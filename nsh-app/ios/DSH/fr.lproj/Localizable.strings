@@ -1,0 +1,5 @@
+"done" = "OK";
+"scan_title" = "Scannez le code d’association";
+"notify_answer" = "Réponse prête";
+"notify_failed" = "Arrêté à cause d’une erreur";
+"notify_decision" = "L’agent attend votre décision";

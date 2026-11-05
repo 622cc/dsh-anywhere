@@ -22,6 +22,12 @@ export interface RelayOptions {
   state?: RelayState; statePath?: string; bind?: string; port?: number; pathPrefix?: string;
   /** Explicit acknowledgement of an independently configured trusted HTTPS ingress. */
   externalTls?: boolean;
+  /**
+   * Requires externalTls. Key per-client quotas on the last X-Forwarded-For hop, which the ingress
+   * must set from its own peer address and never take from the client (Caddy's default without
+   * trusted_proxies). Without it every client shares the ingress address and quota.
+   */
+  trustForwardedFor?: boolean;
   tls?: { cert: string; key: string };
   /** May only lower policy limits; useful for isolated public-boundary tests. */
   limits?: Partial<RelayLimits>; timings?: Partial<RelayTimings>;
@@ -70,6 +76,16 @@ class RateBounds {
     }
     return ++value.count <= maximum;
   }
+}
+/** IPv4-mapped addresses collapse to IPv4; IPv6 groups by /64 so one subscriber cannot rotate addresses. */
+export function clientKey(address: string | undefined): string {
+  const value = (address ?? '').replace(/%.*$/, '');
+  if (value.startsWith('::ffff:') && isIP(value.slice(7)) === 4) return value.slice(7);
+  if (isIP(value) !== 6) return isIP(value) === 4 ? value : 'unknown';
+  const [head = '', tail] = value.toLowerCase().split('::');
+  const width = (part: string | undefined) => part ? part.split(':').reduce((sum, group) => sum + (group.includes('.') ? 2 : 1), 0) : 0;
+  const groups = [...(head ? head.split(':') : []), ...Array<string>(tail === undefined ? 0 : 8 - width(head) - width(tail)).fill('0'), ...(tail ? tail.split(':') : [])];
+  return `${groups.slice(0, 4).map(group => group.replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 function binary(data: RawData): Buffer {
   if (!Buffer.isBuffer(data)) throw new Error('invalid_message');
@@ -122,14 +138,15 @@ export function createRelayServer(options: RelayOptions): RelayServer {
   const bind = options.bind ?? '127.0.0.1', port = options.port ?? 8088, prefix = options.pathPrefix ?? '';
   if ((!isIP(bind) && bind !== 'localhost') || !Number.isInteger(port) || port < 0 || port > 65535 ||
       !/^$|^(?:\/[A-Za-z0-9_-]{1,64}){1,8}$/.test(prefix) || prefix.length > 256 ||
-      (options.tls && options.externalTls) ||
+      (options.tls && options.externalTls) || (options.trustForwardedFor && !options.externalTls) ||
       (!options.tls && !options.externalTls && !['127.0.0.1', '::1', 'localhost'].includes(bind))) throw new Error('invalid_config');
   const limits = policy(DEFAULT_LIMITS as unknown as Record<string, number>, options.limits as Record<string, number> | undefined) as unknown as RelayLimits;
   const timings = policy(DEFAULT_TIMINGS as unknown as Record<string, number>, options.timings as Record<string, number> | undefined) as unknown as RelayTimings;
   if (timings.staleMs < timings.heartbeatMs || timings.heartbeatMs > 15000) throw new Error('invalid_config');
   const state = options.state ?? new RelayState(options.statePath ?? '');
   const routes = new Map<string, Route>(), peers = new Map<WebSocket, PeerMeta>();
-  const rates = new RateBounds(); let closing = false, started: Promise<{ baseUrl: string }> | undefined;
+  // Unauthenticated client keys can churn; keep them apart from per-route keys so a flood cannot starve live routes.
+  const clientRates = new RateBounds(), rates = new RateBounds(); let closing = false, started: Promise<{ baseUrl: string }> | undefined;
   let sweep: ReturnType<typeof setInterval> | undefined; let heartbeat: ReturnType<typeof setInterval> | undefined;
   const webSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, autoPong: false,
     maxPayload: MESSAGE_LIMIT, maxFragments: 1, maxBufferedChunks: 8, allowSynchronousEvents: false });
@@ -141,8 +158,15 @@ export function createRelayServer(options: RelayOptions): RelayServer {
   const server = options.tls ? createHttpsServer({ cert: options.tls.cert, key: options.tls.key, minVersion: 'TLSv1.2', maxHeaderSize: 8192 }, handler) : createHttpServer({ maxHeaderSize: 8192 }, handler);
   server.headersTimeout = 10000; server.requestTimeout = 10000; server.keepAliveTimeout = 1000; server.maxHeadersCount = 32;
   server.maxConnections = 2048;
+  const forwarded = Boolean(options.trustForwardedFor);
+  function client(req: IncomingMessage): string {
+    if (!forwarded) return clientKey(req.socket.remoteAddress);
+    const hops = req.headers['x-forwarded-for'];
+    return 'forwarded:' + clientKey(typeof hops === 'string' ? hops.split(',').at(-1)!.trim() : undefined);
+  }
   server.on('connection', socket => {
-    if (closing || !rates.take(`tcp:${socket.remoteAddress ?? 'unknown'}`, limits.upgradesPerIpPerMinute * 2)) { socket.destroy(); return; }
+    // Behind a trusted ingress every TCP peer is the ingress itself; per-client quotas apply at upgrade instead.
+    if (closing || (!forwarded && !clientRates.take(`tcp:${clientKey(socket.remoteAddress)}`, limits.upgradesPerIpPerMinute * 2))) { socket.destroy(); return; }
     (socket as Socket).setTimeout(10000, () => socket.destroy());
   });
   server.on('clientError', (_error, socket) => reject(socket, 400));
@@ -280,9 +304,8 @@ export function createRelayServer(options: RelayOptions): RelayServer {
   server.on('upgrade', (req, socket, head) => {
     let status = 401;
     try {
-      const ip = req.socket.remoteAddress ?? 'unknown';
       if (closing) { reject(socket, 503); return; }
-      if (!rates.take(`upgrade:${ip}`, limits.upgradesPerIpPerMinute) || !rates.take('upgrade:global', 1200)) { reject(socket, 429); return; }
+      if (!clientRates.take(`upgrade:${client(req)}`, limits.upgradesPerIpPerMinute) || !rates.take('upgrade:global', 1200)) { reject(socket, 429); return; }
       if (req.rawHeaders.length / 2 > 32) { reject(socket, 400); return; }
       if (req.method !== 'GET' || req.headers.origin !== undefined || Object.keys(req.headers).some(key => key.startsWith('sec-fetch-')) || req.headers['sec-websocket-protocol'] !== undefined) { reject(socket, 403); return; }
       const credentialHeaders = new Set(['authorization', 'x-dsh-route', 'x-dsh-access', 'x-dsh-stream', 'x-dsh-join']);

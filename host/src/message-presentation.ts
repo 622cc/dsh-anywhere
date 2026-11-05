@@ -1,4 +1,5 @@
-import type { ChatMessage } from './types.ts';
+// No imports: the phone app (nsh-app) uses this file too.
+export interface PresentedText { text: string; kind: 'message' | 'agent_event' | 'context'; serviceText?: string }
 
 const AGENT_SOURCES = new Set(['agent-message', 'subagent-settled', 'tool-jobs']);
 const CONTEXT_SOURCES = new Set(['compact-checkpoint', 'runtime-context', 'time-context', 'agent-instructions', 'skill-catalog', 'plugin:hindsight']);
@@ -58,7 +59,7 @@ function suffixStart(text: string): number {
   }
 }
 
-export function presentUserText(text: string, sourceKind?: string): Pick<ChatMessage, 'text' | 'kind' | 'serviceText'> {
+export function presentUserText(text: string, sourceKind?: string): PresentedText {
   if (sourceKind === 'user') return { text, kind: 'message' };
   if (AGENT_SOURCES.has(sourceKind ?? '')) return { text, kind: 'agent_event' };
   if (CONTEXT_SOURCES.has(sourceKind ?? '')) return { text, kind: 'context' };

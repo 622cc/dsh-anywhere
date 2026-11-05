@@ -1,10 +1,11 @@
 import { createHash, createPrivateKey, X509Certificate } from 'node:crypto';
-import { lstat, mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { HostError } from './errors.ts';
 import type { HostConfiguration, PreparedHostConfiguration, WorkspaceConfig } from './types.ts';
 import { validateRelayUrl } from './relay-connector.ts';
+import { privateDirectory } from './private-files.ts';
 
 export type LocalHostConfiguration = HostConfiguration & {
   /** Setup records the checked version; plugin YAML must still declare it explicitly. */
@@ -60,7 +61,9 @@ export async function prepareConfiguration(input: HostConfiguration, options: { 
       workspaces.push({ id: workspace.id, name: workspace.name.trim(), path });
     }
     // Refuse state symlinks and canonicalize its parent before creating private state.
-    await mkdir(dirname(raw.statePath), { recursive: true, mode: 0o700 });
+    // A new state directory gets owner-only ACLs on Windows as well; existing installs are left as configured.
+    try { await lstat(dirname(raw.statePath)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; await privateDirectory(dirname(raw.statePath)); }
     const statePath = join(await realpath(dirname(raw.statePath)), basename(raw.statePath));
     try { const info = await lstat(statePath); if (!info.isFile() || info.isSymbolicLink()) throw new HostError('invalid_config'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -75,6 +78,18 @@ export async function prepareConfiguration(input: HostConfiguration, options: { 
       if (!raw.relay || typeof raw.relay !== 'object' || !/^[a-f0-9]{32}$/.test(raw.relay.routeId) || !/^[A-Za-z0-9_-]{43}$/.test(raw.relay.connectorToken) || bind !== '127.0.0.1' || port < 1 || !raw.tls || raw.allowInsecureLoopback) throw new HostError('invalid_config');
       config.relay = { url: validateRelayUrl(raw.relay.url, options.allowInsecureRelayLoopback === true), routeId: raw.relay.routeId, connectorToken: raw.relay.connectorToken };
       const innerUrl = `https://h-${raw.relay.routeId}.dsh.invalid`;
+      if (config.publicUrl && config.publicUrl !== innerUrl) throw new HostError('invalid_config');
+      config.publicUrl = innerUrl; config.includeCertificatePem = true;
+    }
+    if (raw.tailcat !== undefined) {
+      const tailcat = raw.tailcat as unknown as Record<string, unknown>;
+      // The helper forwards Tailcat streams only to this fixed loopback TLS listener.
+      if (!tailcat || typeof tailcat !== 'object' || Array.isArray(tailcat) || Object.keys(tailcat).some(key => !['enabled', 'hostId', 'helperPath'].includes(key)) ||
+          tailcat.enabled !== true || typeof tailcat.hostId !== 'string' || !/^[a-f0-9]{32}$/.test(tailcat.hostId) ||
+          (tailcat.helperPath !== undefined && (typeof tailcat.helperPath !== 'string' || !isAbsolute(tailcat.helperPath))) ||
+          raw.relay || bind !== '127.0.0.1' || port < 1024 || port > 65534 || !raw.tls || raw.allowInsecureLoopback) throw new HostError('invalid_config');
+      config.tailcat = { enabled: true, hostId: tailcat.hostId, ...(typeof tailcat.helperPath === 'string' ? { helperPath: resolve(tailcat.helperPath) } : {}) };
+      const innerUrl = `https://h-${tailcat.hostId}.dsh.invalid`;
       if (config.publicUrl && config.publicUrl !== innerUrl) throw new HostError('invalid_config');
       config.publicUrl = innerUrl; config.includeCertificatePem = true;
     }
@@ -97,7 +112,7 @@ export async function prepareConfiguration(input: HostConfiguration, options: { 
       if (url.protocol !== 'https:') throw new HostError('invalid_config');
       const host = url.hostname.replace(/^\[|\]$/g, '');
       if (!(isIP(host) ? x509.checkIP(host) : x509.checkHost(host))) throw new HostError('invalid_config');
-      if (config.relay && x509.checkHost(host, { wildcards: false, partialWildcards: false, multiLabelWildcards: false, subject: 'never' }) !== host) throw new HostError('invalid_config');
+      if ((config.relay || config.tailcat) && x509.checkHost(host, { wildcards: false, partialWildcards: false, multiLabelWildcards: false, subject: 'never' }) !== host) throw new HostError('invalid_config');
     }
     return { config, tls: { cert, key, minVersion: 'TLSv1.2' }, pinSha256, certificatePem: leafPem + '\n' };
   } catch { throw new HostError('invalid_config'); }

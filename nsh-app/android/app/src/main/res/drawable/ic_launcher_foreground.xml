@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher mark (assets/brand/icon.svg): a whale with a round back and its eye cut out. The 108 dp
+     canvas is 1536 units; the group repeats icon.svg's x2, moved 256 in to the 72 dp the masks show, so the mark stays
+     within the 66 dp safe circle. Also the themed icon's shape (<monochrome>), where only alpha counts. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="1536" android:viewportHeight="1536">
+    <group android:translateX="256" android:translateY="256" android:scaleX="2" android:scaleY="2">
+        <path android:fillType="evenOdd" android:fillColor="#F9FAFB"
+            android:pathData="M136 216c0-53 43-96 96-96h48c53 0 96 43 96 96v12c0 53-43 96-96 96H236l-62 54c-7 6-18 1-18-8v-46h-20c-27 0-48-22-48-48V216zM230 222a26 26 0 1 0 52 0a26 26 0 1 0-52 0z" />
+    </group>
+</vector>

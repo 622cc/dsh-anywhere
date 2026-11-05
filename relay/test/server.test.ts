@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { request } from 'node:http';
 import { test } from 'node:test';
 import WebSocket from 'ws';
 import { RelayState, hashSecret } from '../src/state.ts';
-import { createRelayServer } from '../src/server.ts';
+import { clientKey, createRelayServer } from '../src/server.ts';
 
 class Peer {
   readonly ws: WebSocket;
@@ -244,6 +245,59 @@ test('public upgrade and per-route open rate limits reject excess before admitti
     await rejected(f.peer('/v1/control', { Authorization: 'Bearer ' + randomBytes(32).toString('base64url'), 'X-DSH-Route': f.owner.routeId }), 401);
     await rejected(f.peer('/v1/control', { Authorization: 'Bearer ' + randomBytes(32).toString('base64url'), 'X-DSH-Route': f.owner.routeId }), 401);
     await rejected(f.peer('/v1/control', { Authorization: 'Bearer ' + randomBytes(32).toString('base64url'), 'X-DSH-Route': f.owner.routeId }), 429);
+  } finally { await f.close(); }
+});
+
+function upgradeStatus(baseUrl: string, path: string, headers: Record<string, string>): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = request(new URL(baseUrl.replace('ws:', 'http:') + path), { agent: false, headers: { Connection: 'Upgrade', Upgrade: 'websocket',
+      'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': randomBytes(16).toString('base64'), ...headers } });
+    req.on('response', res => { res.resume(); resolve(res.statusCode!); });
+    req.on('upgrade', (_res, socket) => { socket.destroy(); resolve(101); });
+    req.on('error', reject); req.end();
+  });
+}
+
+test('client quota keys collapse mapped IPv4 and group IPv6 by /64', () => {
+  assert.equal(clientKey('::ffff:192.0.2.7'), '192.0.2.7');
+  assert.equal(clientKey('192.0.2.7'), '192.0.2.7');
+  assert.equal(clientKey('2001:db8:1:2:3:4:5:6'), '2001:db8:1:2::/64');
+  assert.equal(clientKey('2001:0db8:0001:0002::9'), '2001:db8:1:2::/64');
+  assert.equal(clientKey('2001:db8::1'), '2001:db8:0:0::/64');
+  assert.equal(clientKey('64:ff9b::192.0.2.7'), '64:ff9b:0:0::/64');
+  assert.equal(clientKey('fe80::1%eth0'), 'fe80:0:0:0::/64');
+  for (const value of [undefined, '', 'localhost', '1.2.3', '2001:db8::1::2']) assert.equal(clientKey(value), 'unknown');
+});
+
+test('forwarded client quotas use the ingress-set last hop and cannot be spoofed by an earlier hop', async () => {
+  const state = new RelayState(':memory:');
+  try {
+    assert.throws(() => createRelayServer({ state, port: 0, trustForwardedFor: true }), /invalid_config/);
+    const f = await fixture({ externalTls: true, trustForwardedFor: true, limits: { upgradesPerIpPerMinute: 2 } });
+    try {
+      const attempt = (hops: string) => upgradeStatus(f.baseUrl, '/v1/control', { Authorization: 'Bearer ' + randomBytes(32).toString('base64url'), 'X-DSH-Route': f.owner.routeId, 'X-Forwarded-For': hops });
+      assert.equal(await attempt('203.0.113.1, 198.51.100.1'), 401);
+      assert.equal(await attempt('203.0.113.2, 198.51.100.1'), 401);
+      assert.equal(await attempt('203.0.113.3, 198.51.100.1'), 429);
+      assert.equal(await attempt('2001:db8:1:2::1'), 401);
+      assert.equal(await attempt('2001:db8:1:2::2'), 401);
+      assert.equal(await attempt('2001:db8:1:2::3'), 429);
+      assert.equal(await attempt('198.51.100.2'), 401);
+    } finally { await f.close(); }
+  } finally { state.close(); }
+});
+
+test('a flood of distinct unauthenticated clients cannot starve an established route', async () => {
+  const f = await fixture({ externalTls: true, trustForwardedFor: true });
+  try {
+    // The route's first per-route quota entry is created only after the client table is saturated.
+    for (let batch = 0; batch < 4200; batch += 200) {
+      await Promise.all(Array.from({ length: 200 }, (_, i) => upgradeStatus(f.baseUrl, '/v1/control', {
+        Authorization: 'Bearer ' + randomBytes(32).toString('base64url'), 'X-DSH-Route': f.owner.routeId,
+        'X-Forwarded-For': `10.${(batch + i) >> 8 & 255}.${(batch + i) & 255}.1` })));
+    }
+    await f.publish();
+    await f.publish();
   } finally { await f.close(); }
 });
 

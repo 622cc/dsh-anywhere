@@ -1,6 +1,6 @@
 # DSH Mobile opaque relay 0.2
 
-This Node 24 service is managed by the operator. It routes bounded WebSocket streams carrying the companion's existing end-to-end TLS. It has no DSH adapter, model execution, user account service, public provisioning API or application cryptography. The wire format is defined in [the transport contract](<../docs/RELAY_PROTOCOL.md>).
+This Node 24 service is managed by the operator. It routes bounded WebSocket streams carrying the companion's existing end-to-end TLS. It has no DSH adapter, model execution, user account service, public provisioning API or application cryptography.
 
 ## Build and local administration
 
@@ -19,7 +19,7 @@ Files are created with POSIX modes 0700/0600. Windows does not enforce these POS
 
 `serve` defaults to loopback. Native TLS uses `--cert <PEM> --key <PEM>` (TLS 1.2 minimum). Alternatively, an independently configured, trusted HTTPS ingress may use `--external-tls`; the flag records the operator’s acknowledgement that the ingress handles TLS. Non-loopback plaintext without either choice is refused. The HTTP backend must never be published directly. The service does not install HTTPS routing, touch firewalls, deploy itself, or expose a DSH port.
 
-Optional `--prefix /canonical/path` is applied to all endpoints, including `GET /canonical/path/healthz`. Health returns only `{"ok":true}`. Keep path prefixes identical in invitations/connector setup and ingress routing. Offloaded TLS must preserve Upgrade and authorization headers and provide its own public-edge quotas; forwarded IP headers are deliberately not trusted by this service. Backend IP quotas consequently share the ingress peer address.
+Optional `--prefix /canonical/path` is applied to all endpoints, including `GET /canonical/path/healthz`. Health returns only `{"ok":true}`. Keep path prefixes identical in invitations/connector setup and ingress routing. Offloaded TLS must preserve Upgrade and authorization headers. By default forwarded IP headers are not trusted, so backend IP quotas share the ingress peer address and one abusive client can exhaust them for everyone. With `--external-tls --trust-forwarded-for`, per-client quotas use the last `X-Forwarded-For` hop instead; enable it only when the ingress is the sole path to the backend and sets that hop from its own peer address (Caddy `reverse_proxy` does this by default when `trusted_proxies` is not configured). IPv6 clients are grouped by /64. A global upgrade cap still bounds the service, so a distributed flood can still degrade availability; add public-edge quotas where your ingress supports them.
 
 ## Programmatic use
 

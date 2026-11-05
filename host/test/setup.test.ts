@@ -53,6 +53,13 @@ test('setup-direct creates stable registry TLS identity satisfying Android trust
   assert.ok(!h.output().includes(key)); assert.ok(!h.output().includes(pem));
 });
 
+test('setup-direct requires an absolute explicit OpenSSL executable', async t => {
+  const root = realpathSync.native(await mkdtemp(join(tmpdir(), 'dsh-mobile-bind-')));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const io = { out() {}, error() {} }, base = ['--host', '127.0.0.1', '--dsh-version', '0.2.1-alpha.1'];
+  assert.equal(await runAdminCli(['setup-direct', '--config', join(root, 'relative', 'host.json'), '--openssl', 'openssl', ...base], io), 1, 'explicit OpenSSL must be absolute');
+});
+
 test('setup-direct and pairing accept short-name private roots without rotating canonical identity', { skip: process.platform !== 'win32' }, async t => {
   const root = realpathSync.native(await mkdtemp(join(tmpdir(), 'dsh-mobile-short-')));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -89,7 +96,7 @@ test('built admin CLI executes through an 8.3 entry path', { skip: process.platf
   if (shortEntry === entry) { t.skip('This volume does not expose 8.3 names'); return; }
   const result = spawnSync(process.execPath, [shortEntry, '--help'], { encoding: 'utf8', timeout: 15000 });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /DSH Mobile local administration/);
+  assert.match(result.stdout, /DSH Anywhere local administration/);
 });
 
 test('setup-direct refuses unsafe hosts, partial state and unverified version without overwriting identity', async t => {

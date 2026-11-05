@@ -1,0 +1,88 @@
+# The iOS shell (xcodegen; ios/build.sh generates DSH.xcodeproj, which is not tracked). The same NSH bundle as the
+# Android app, in one NshAppView, with the host functions of ../android/app/src/main/java/dev/dshmobile/nsh.
+name: DSH
+options:
+  bundleIdPrefix: io.jingtao
+  deploymentTarget: { iOS: "17.0" }
+  developmentLanguage: en
+packages:
+  DSHKit: { path: DSHKit }
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: $(DSH_VERSION)
+    CURRENT_PROJECT_VERSION: $(DSH_BUILD)
+    DSH_VERSION: "0.1.1"
+    DSH_BUILD: "2"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: $(DSH_TEAM) # set at build time (ios/build.sh), never in this file
+targets:
+  DSH:
+    type: application
+    platform: iOS
+    sources:
+      - path: DSH
+      - path: build/nsh # nsh build output (ios/build.sh), a folder resource the app loads as nsh/bundle.nshc
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: DSHKit
+      - framework: Frameworks/NativeShell.xcframework
+        embed: false
+      - framework: Frameworks/Dshtailcat.xcframework
+        embed: false
+      - sdk: libresolv.tbd # the Go runtime's DNS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.jingtao.dshanywhere
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon # DSH/Assets.xcassets (from ../assets/brand, scripts/app-icon.sh)
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: false
+        INFOPLIST_FILE: DSH/Info.plist
+        OTHER_LDFLAGS: [-ObjC]
+        # Signed to run locally on the simulator: unsigned, the app has no keychain entitlement and cannot keep its link
+        # (SecItemAdd -34018, seen 2026-10-29).
+        "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64 # the frameworks have arm64 simulator slices only
+    info:
+      path: DSH/Info.plist
+      properties:
+        CFBundleDisplayName: DSH
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [en, ru, zh-Hans, zh-Hant, es, fr, ko, ja]
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: { UIColorName: "" }
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIViewControllerBasedStatusBarAppearance: true
+        # A pairing QR's text (dshm1:…) opened from the system camera or a link: the app starts pairing with it.
+        CFBundleURLTypes:
+          - CFBundleURLName: io.jingtao.dshanywhere.pair
+            CFBundleURLSchemes: [dshm1]
+        NSCameraUsageDescription: Камера читает код подключения на экране компьютера.
+        # Plain http only to this device's loopback (the companion's tunnel ends there); everything else needs TLS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+  DSHUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [DSHUITests]
+    dependencies:
+      - target: DSH
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: io.jingtao.dshanywhere.uitests
+        TEST_TARGET_NAME: DSH
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+schemes:
+  DSH:
+    build:
+      targets: { DSH: all, DSHUITests: [test] }
+    test:
+      config: Debug
+      targets: [DSHUITests]
