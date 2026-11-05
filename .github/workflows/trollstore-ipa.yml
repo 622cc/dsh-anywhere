@@ -33,6 +33,11 @@ jobs:
           cargo build --release -p nsh-cli
           cargo xtask ios-embed --no-catalyst --no-dev
 
+      - name: Stage NativeShell iOS framework
+        run: |
+          mkdir -p nsh-app/ios/Frameworks
+          cp -R "$RUNNER_TEMP/nsh/dist/nsh/embed/ios/NativeShell.xcframework" nsh-app/ios/Frameworks/
+
       - name: Build Tailcat iOS framework
         working-directory: .
         run: IOS_ONLY=1 tools/build-tailcat.sh
