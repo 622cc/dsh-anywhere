@@ -1,0 +1,68 @@
+name: Build TrollStore IPA
+
+on:
+  push:
+    branches: [ci/trollstore-ipa]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - name: Check out DSH Anywhere
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build NSH iOS runtime
+        run: |
+          git clone --depth 1 --branch dsh-anywhere https://github.com/jt-wang/nsh.git "$RUNNER_TEMP/nsh"
+          cd "$RUNNER_TEMP/nsh"
+          cargo build --release -p nsh-cli
+          cargo xtask ios-embed --no-catalyst --no-dev
+
+      - name: Build Tailcat iOS framework
+        working-directory: .
+        run: IOS_ONLY=1 tools/build-tailcat.sh
+
+      - name: Build unsigned iOS app and package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          export NSH_SOURCE="$RUNNER_TEMP/nsh"
+          cd nsh-app
+          "$NSH_SOURCE/target/release/nsh" build "$PWD" --release --out "$PWD/ios/build/nsh"
+          rm -f ios/build/nsh/bundle.js ios/build/nsh/bundle.js.map
+          version="$(python3 -c 'import json; a=json.load(open("nsh.json")); print(a["version"], a["build"])')"
+          (cd ios && xcodegen generate --quiet)
+          xcodebuild -quiet -project ios/DSH.xcodeproj -scheme DSH -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath ios/build/derived \
+            DSH_VERSION="${version% *}" DSH_BUILD="${version#* }" \
+            DSH_BUNDLE_PREFIX=io.jingtao DSH_TEAM='' CODE_SIGNING_ALLOWED=NO build
+          app="ios/build/derived/Build/Products/Release-iphoneos/DSH.app"
+          test -d "$app"
+          staging="$RUNNER_TEMP/ipa-staging"
+          mkdir -p "$staging/Payload"
+          cp -R "$app" "$staging/Payload/DSH.app"
+          (cd "$staging" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/nsh-app/ios/build/DSH-TrollStore.ipa" Payload)
+          shasum -a 256 ios/build/DSH-TrollStore.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-TrollStore-IPA
+          path: nsh-app/ios/build/DSH-TrollStore.ipa
+          if-no-files-found: error
+          retention-days: 14
