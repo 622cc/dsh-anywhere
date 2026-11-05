@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "DSHKit",
-    platforms: [.iOS(.v17), .macOS(.v15)],
+    platforms: [.iOS(.v16), .macOS(.v15)],
     products: [.library(name: "DSHKit", targets: ["DSHKit"])],
     targets: [
         .target(name: "DSHKit"),

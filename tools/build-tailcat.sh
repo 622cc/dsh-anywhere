@@ -93,7 +93,7 @@ build_xcframework() {
   bind_copy
   rm -rf "$out/Dshtailcat.xcframework"
   (cd "$bind_folder/tailcat" && PATH="$bin:$PATH" "$bin/gomobile" bind \
-    -target=ios/arm64,iossimulator/arm64 -iosversion 17.0 \
+    -target=ios/arm64,iossimulator/arm64 -iosversion 16.0 \
     -trimpath -ldflags='-s -w' -tags ts_omit_ssh \
     -o "$out/Dshtailcat.xcframework" ./mobile) || { rm -rf "$bind_folder"; fail "gomobile bind failed"; }
   rm -rf "$bind_folder"

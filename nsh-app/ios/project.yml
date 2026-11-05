@@ -2,7 +2,7 @@
 # Android app, in one NshAppView, with the host functions of ../android/app/src/main/java/dev/dshmobile/nsh.
 name: DSH
 options:
-  deploymentTarget: { iOS: "17.0" }
+  deploymentTarget: { iOS: "16.0" }
   developmentLanguage: en
 packages:
   DSHKit: { path: DSHKit }
