@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: macos-26-intel
     steps:
       - name: Check out DSH Anywhere
         uses: actions/checkout@v4
